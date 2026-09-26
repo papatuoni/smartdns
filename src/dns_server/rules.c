@@ -510,6 +510,17 @@ int _dns_server_pre_process_rule_flags(struct dns_request *request)
 	unsigned int flags = _dns_server_get_rule_flags(request);
 	int rcode = DNS_RC_NOERROR;
 
+	/* cache-group: 只影响从哪个组读缓存，不影响实际查询路径 */
+	{
+		struct dns_cache_group_rule *cache_group_rule =
+			(struct dns_cache_group_rule *)_dns_server_get_dns_rule(request, DOMAIN_RULE_CACHE_GROUP);
+		if (cache_group_rule != NULL && cache_group_rule->group_name != NULL) {
+			safe_strncpy(request->cache_group_name, cache_group_rule->group_name, DNS_GROUP_NAME_LEN);
+			tlog(TLOG_DEBUG, "domain %s read cache from group %s", request->domain,
+				 cache_group_rule->group_name);
+		}
+	}
+
 	if (flags & DOMAIN_FLAG_NO_SERVE_EXPIRED) {
 		request->no_serve_expired = 1;
 	}
