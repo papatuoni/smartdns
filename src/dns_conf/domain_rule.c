@@ -324,6 +324,7 @@ static struct dns_rule_info dns_rule_info_table[DOMAIN_RULE_MAX] = {
 	[DOMAIN_RULE_NFTSET_IP] = {sizeof(struct dns_nftset_rule), NULL, _rule_nftset_clone, _rule_nftset_append, _rule_nftset_destroy, 1},
 	[DOMAIN_RULE_IPSET_IPV4] = {sizeof(struct dns_ipset_rule), NULL, _rule_ipset_clone, _rule_ipset_append, _rule_ipset_destroy, 1},
 	[DOMAIN_RULE_GROUP] = {sizeof(struct dns_group_rule), NULL, NULL, NULL, NULL, 0},
+	[DOMAIN_RULE_CACHE_GROUP] = {sizeof(struct dns_cache_group_rule), NULL, NULL, NULL, NULL, 0},
 	[DOMAIN_RULE_NFTSET_IP6] = {sizeof(struct dns_nftset_rule), NULL, _rule_nftset_clone, _rule_nftset_append, _rule_nftset_destroy, 1},
 	[DOMAIN_RULE_IPSET_IPV6] = {sizeof(struct dns_ipset_rule), NULL, _rule_ipset_clone, _rule_ipset_append, _rule_ipset_destroy, 1},
 
@@ -1013,6 +1014,38 @@ errout:
 	return 0;
 }
 
+int _conf_domain_rule_cache_group(const char *domain, const char *group_name)
+{
+	struct dns_cache_group_rule *cache_group_rule = NULL;
+	const char *group = NULL;
+
+	group = _dns_conf_get_group_name(group_name);
+	if (group == NULL) {
+		goto errout;
+	}
+
+	cache_group_rule = _new_dns_rule(DOMAIN_RULE_CACHE_GROUP);
+	if (cache_group_rule == NULL) {
+		goto errout;
+	}
+
+	cache_group_rule->group_name = group;
+
+	if (_config_domain_rule_add(domain, DOMAIN_RULE_CACHE_GROUP, cache_group_rule) != 0) {
+		goto errout;
+	}
+
+	_dns_rule_put(&cache_group_rule->head);
+	return 0;
+errout:
+	if (cache_group_rule) {
+		_dns_rule_put(&cache_group_rule->head);
+	}
+
+	tlog(TLOG_ERROR, "add cache-group %s, %s failed", domain, group_name);
+	return 0;
+}
+
 static int _conf_domain_rule_dualstack_selection(char *domain, const char *yesno)
 {
 	if (strncmp(yesno, "yes", sizeof("yes")) == 0 || strncmp(yesno, "Yes", sizeof("Yes")) == 0) {
@@ -1067,6 +1100,7 @@ int _config_domain_rules(void *data, int argc, char *argv[])
 		{"no-ip-alias", no_argument, NULL, 257},
 		{"enable-cache", no_argument, NULL, 258},
 		{"no-ignore-ip", no_argument, NULL, 259},
+		{"cache-group", required_argument, NULL, 260},
 		{NULL, no_argument, NULL, 0}
 	};
 	/* clang-format on */
@@ -1294,6 +1328,19 @@ int _config_domain_rules(void *data, int argc, char *argv[])
 		case 259: {
 			if (_conf_domain_rule_no_ignore_ip(domain) != 0) {
 				tlog(TLOG_ERROR, "set no-ignore-ip rule failed.");
+				goto errout;
+			}
+
+			break;
+		}
+		case 260: {
+			const char *cache_group = optarg;
+			if (cache_group == NULL) {
+				goto errout;
+			}
+
+			if (_conf_domain_rule_cache_group(domain, cache_group) != 0) {
+				tlog(TLOG_ERROR, "set cache-group rule failed.");
 				goto errout;
 			}
 
