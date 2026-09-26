@@ -90,7 +90,7 @@ enum domain_rule {
 	DOMAIN_RULE_IPSET_IPV4, /* IPv4 IPSet */
 
 	DOMAIN_RULE_GROUP, /* Group rule */
-
+	DOMAIN_RULE_CACHE_GROUP, /* Cache group rule (read cache from another group) */
 	DOMAIN_RULE_NFTSET_IP6, /* NFTSet IPv6 */
 	DOMAIN_RULE_IPSET_IPV6, /* IPv6 IPSet */
 
@@ -287,6 +287,11 @@ struct dns_nameserver_rule {
 };
 
 struct dns_group_rule {
+	struct dns_rule head;
+	const char *group_name;
+};
+
+struct dns_cache_group_rule {
 	struct dns_rule head;
 	const char *group_name;
 };
