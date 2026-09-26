@@ -289,7 +289,8 @@ struct dns_request {
 	struct dns_conf_group *conf;
 	uint32_t server_flags;
 	char dns_group_name[DNS_GROUP_NAME_LEN];
-
+	char cache_group_name[DNS_GROUP_NAME_LEN];
+	
 	/* dns request list */
 	struct list_head list;
 
