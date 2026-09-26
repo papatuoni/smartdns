@@ -331,13 +331,18 @@ int _dns_server_process_cache(struct dns_request *request)
 	struct dns_cache *dns_cache = NULL;
 	struct dns_cache *dualstack_dns_cache = NULL;
 	int ret = -1;
+	const char *cache_group_name = request->dns_group_name;
 
-	if (_dns_server_has_bind_flag(request, BIND_FLAG_NO_CACHE) == 0) {
+	/* 指定了 cache-group：改从该组读缓存，且不受 bind 的 -no-cache 限制 */
+
+	if (request->cache_group_name[0] != '\0') {
+		cache_group_name = request->cache_group_name;
+	} else if (_dns_server_has_bind_flag(request, BIND_FLAG_NO_CACHE) == 0) {
 		goto out;
 	}
 
 	struct dns_cache_key cache_key;
-	cache_key.dns_group_name = request->dns_group_name;
+	cache_key.dns_group_name = cache_group_name;
 	cache_key.domain = request->domain;
 	cache_key.qtype = request->qtype;
 	cache_key.query_flag = request->server_flags;
@@ -409,7 +414,7 @@ out_update_cache:
 		struct dns_server_query_option dns_query_options;
 		int prefetch_flags = 0;
 		dns_query_options.server_flags = request->server_flags;
-		dns_query_options.dns_group_name = request->dns_group_name;
+		dns_query_options.dns_group_name = cache_group_name;
 		if (request->conn == NULL) {
 			dns_query_options.server_flags = dns_cache_get_query_flag(dns_cache);
 			dns_query_options.dns_group_name = dns_cache_get_dns_group_name(dns_cache);
