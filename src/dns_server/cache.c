@@ -130,7 +130,7 @@ int _dns_server_request_update_cache(struct dns_request *request, int speed, dns
 	int ttl = 0;
 	int ret = -1;
 
-	tlog(TLOG_WARN, "CG insert domain=%s group=%s flags=%u",
+	tlog(TLOG_DEBUG, "CG insert domain=%s group=%s flags=%u",
 	     request->domain, request->dns_group_name, request->server_flags);
 
 	if (qtype != DNS_T_A && qtype != DNS_T_AAAA && qtype != DNS_T_HTTPS) {
@@ -351,13 +351,12 @@ int _dns_server_process_cache(struct dns_request *request)
 	cache_key.query_flag = request->server_flags;
 
 	dns_cache = dns_cache_lookup(&cache_key);
-	/* 新增：跨组读取时，忽略 query_flag 差异再试一次 */
+	/* 跨组读取：忽略 query_flag 差异（6653 通常为 0，53 带 -no-* 参数） */
 	if (dns_cache == NULL && request->cache_group_name[0] != '\0') {
 		struct dns_cache_key retry_key = cache_key;
 		retry_key.query_flag = 0;
 		dns_cache = dns_cache_lookup(&retry_key);
-		tlog(TLOG_WARN, "CG domain=%s flags=%u retry0=%s",
-		     request->domain, request->server_flags, dns_cache ? "HIT" : "MISS");
+		tlog(TLOG_DEBUG, "cache-group %s hit=%s", request->domain, dns_cache ? "yes" : "no");
 	}
 	
 	if (dns_cache == NULL) {
