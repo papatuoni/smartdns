@@ -24,6 +24,7 @@
 #include "request.h"
 #include "rules.h"
 #include "soa.h"
+#include "smartdns/dns_stats.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -353,9 +354,11 @@ int _dns_server_process_cache(struct dns_request *request)
 	dns_cache = dns_cache_lookup(&cache_key);
 	/* 跨组读取：忽略 query_flag 差异（6653 通常为 0，53 带 -no-* 参数） */
 	if (dns_cache == NULL && request->cache_group_name[0] != '\0') {
-		struct dns_cache_key retry_key = cache_key;
-		retry_key.query_flag = 0;
-		dns_cache = dns_cache_lookup(&retry_key);
+		struct dns_cache_key alt_key = cache_key;
+		alt_key.query_flag = 0;
+		dns_cache = dns_cache_lookup(&alt_key);
+		/* 两次 lookup 实为一次查询的两次尝试，抵消一次分母 */
+		stats_dec(&dns_stats.cache.check_count);
 		tlog(TLOG_DEBUG, "cache-group %s hit=%s", request->domain, dns_cache ? "yes" : "no");
 	}
 	
