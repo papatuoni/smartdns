@@ -433,6 +433,11 @@ out_update_cache:
 			dns_query_options.server_flags = dns_cache_get_query_flag(dns_cache);
 			dns_query_options.dns_group_name = dns_cache_get_dns_group_name(dns_cache);
 		}
+		/* 新增：跨组读取时，续期走目标组的上游，避免回落到分流器 */
+		if (request->cache_group_name[0] != '\0') {
+			dns_query_options.dns_group_name = request->cache_group_name;
+			dns_query_options.server_flags = dns_cache_get_query_flag(dns_cache);
+		}
 
 		dns_query_options.ecs_enable_flag = 0;
 		if (request->has_ecs) {
