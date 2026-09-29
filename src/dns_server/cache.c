@@ -349,7 +349,9 @@ int _dns_server_process_cache(struct dns_request *request)
 	cache_key.query_flag = request->server_flags;
 
 	dns_cache = dns_cache_lookup(&cache_key);
-	/* 跨组读取：忽略 query_flag 差异（6653 通常为 0，53 带 -no-* 参数） */
+	/* 跨组读取：忽略 query_flag 差异。
+	   6653 端口不带任何 -no-* 参数，其写入的缓存 query_flag 恒为 0；
+	   若将来为 6653 添加 bind 参数，此处必须同步修改，否则跨组读取静默失效。 */
 	if (dns_cache == NULL && request->cache_group_name[0] != '\0') {
 		struct dns_cache_key alt_key = cache_key;
 		alt_key.query_flag = 0;
