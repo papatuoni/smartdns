@@ -131,9 +131,6 @@ int _dns_server_request_update_cache(struct dns_request *request, int speed, dns
 	int ttl = 0;
 	int ret = -1;
 
-	tlog(TLOG_DEBUG, "CG insert domain=%s group=%s flags=%u",
-	     request->domain, request->dns_group_name, request->server_flags);
-
 	if (qtype != DNS_T_A && qtype != DNS_T_AAAA && qtype != DNS_T_HTTPS) {
 		goto errout;
 	}
@@ -144,7 +141,7 @@ int _dns_server_request_update_cache(struct dns_request *request, int speed, dns
 		ttl = _dns_server_get_conf_ttl(request, request->ip_ttl);
 	}
 
-	tlog(TLOG_DEBUG, "cache %s qtype: %d ttl: %d\n", request->domain, qtype, ttl);
+	tlog(TLOG_DEBUG, "cache %s qtype: %d ttl: %d group=%s\n", request->domain, qtype, ttl, request->dns_group_name);
 
 	/* if doing prefetch, update cache only */
 	struct dns_cache_key cache_key;
