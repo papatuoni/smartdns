@@ -101,9 +101,6 @@ enum domain_rule {
 	DOMAIN_RULE_TTL,           /* TTL control */
 	DOMAIN_RULE_TXT,           /* TXT record */
 
-	/* 追加在末尾：避免插入中间导致 NFTSET_IP6/IPSET_IPV6 等既有枚举值位移 */
-	DOMAIN_RULE_CACHE_GROUP, /* Cache group rule (read cache from another group) */
-
 	DOMAIN_RULE_MAX,
 };
 
