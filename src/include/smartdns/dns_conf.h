@@ -294,6 +294,7 @@ struct dns_group_rule {
 struct dns_cache_group_rule {
 	struct dns_rule head;
 	const char *group_name;
+	uint32_t query_flag;
 };
 
 struct dns_server_groups {
