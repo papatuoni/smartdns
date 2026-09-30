@@ -260,7 +260,8 @@ int _dns_server_do_query(struct dns_request *request, int skip_notify_event)
 	_dns_server_get_domain_rule(request);
 
 	_dns_server_setup_dns_group_name(request, &server_group_name);
-	request->cache_group_name[0] = '\0';
+	/* 必须在 _dns_server_pre_process_rule_flags() 之前清零：后者负责按域名规则赋值，顺序颠倒会导致跨组读缓存失效。 */
+	request->cache_group_name = NULL;
 
 	if (_dns_server_setup_request_conf(request) != 0) {
 		goto errout;
