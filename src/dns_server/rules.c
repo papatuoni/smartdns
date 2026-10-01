@@ -515,7 +515,7 @@ int _dns_server_pre_process_rule_flags(struct dns_request *request)
 		struct dns_cache_group_rule *cache_group_rule =
 			(struct dns_cache_group_rule *)_dns_server_get_dns_rule(request, DOMAIN_RULE_CACHE_GROUP);
 		if (cache_group_rule != NULL && cache_group_rule->group_name != NULL) {
-			safe_strncpy(request->cache_group_name, cache_group_rule->group_name, DNS_GROUP_NAME_LEN);
+			request->cache_group_name = cache_group_rule->group_name;
 			tlog(TLOG_DEBUG, "domain %s read cache from group %s", request->domain,
 				 cache_group_rule->group_name);
 		}
