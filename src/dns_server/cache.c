@@ -336,7 +336,7 @@ int _dns_server_process_cache(struct dns_request *request)
 
 	/* 指定了 cache-group：改从该组读缓存，且不受 bind 的 -no-cache 限制 */
 
-	if (request->cache_group_name[0] != '\0') {
+	if (request->cache_group_name != NULL) {
 		cache_group_name = request->cache_group_name;
 	} else if (_dns_server_has_bind_flag(request, BIND_FLAG_NO_CACHE) == 0) {
 		goto out;
