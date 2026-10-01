@@ -350,7 +350,7 @@ int _dns_server_process_cache(struct dns_request *request)
 
 	/* 跨组读取：目标组由不带 bind 参数的 6653 写入，其条目 query_flag 恒为 0。
 	   若将来为 6653 添加 bind 参数，此处需同步修改，否则跨组读取静默失效。 */
-	if (request->cache_group_name[0] != '\0') {
+	if (request->cache_group_name != NULL) {
 		cache_key.query_flag = 0;
 	}
 
@@ -431,7 +431,7 @@ out_update_cache:
 			dns_query_options.dns_group_name = dns_cache_get_dns_group_name(dns_cache);
 		}
 		/* 新增：跨组读取时，续期走目标组的上游，避免回落到分流器 */
-		if (request->cache_group_name[0] != '\0') {
+		if (request->cache_group_name != NULL) {
 			dns_query_options.dns_group_name = request->cache_group_name;
 			dns_query_options.server_flags = dns_cache_get_query_flag(dns_cache);
 		}
