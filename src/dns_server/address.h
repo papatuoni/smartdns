@@ -32,6 +32,13 @@ int _dns_ip_address_check_add(struct dns_request *request, char *cname, unsigned
 
 struct dns_ip_address *_dns_ip_address_get(struct dns_request *request, unsigned char *addr, dns_type_t addr_type);
 
+/* 双 WAN：记录某个候选 IP 的来源线路出口，测速时用它发包。
+ * 之所以独立成函数而不是给 _dns_ip_address_check_add 加参数，
+ * 是为了不动它现有的 7 个调用点（address.c / answer.c / context.c / dns64.c）。 */
+void _dns_ip_address_set_src_bind(struct dns_request *request, unsigned char *addr, dns_type_t addr_type,
+								  const struct ping_bind *bind);
+
+	
 int _dns_server_process_address(struct dns_request *request);
 
 int _dns_server_is_adblock_ipv6(const unsigned char addr[16]);
