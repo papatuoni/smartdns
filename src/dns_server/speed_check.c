@@ -242,11 +242,6 @@ static void _dns_server_request_get_ping_bind(struct dns_request *request)
 
 static int _dns_server_ping(struct dns_request *request, PING_TYPE type, char *ip, int timeout)
 {
-	if (fast_ping_start(type, ip, 1, 0, timeout, _dns_server_ping_result, request) == NULL) {
-		if (request->ping_bind_set == 0) {
-		_dns_server_request_get_ping_bind(request);
-		request->ping_bind_set = 1;
-	}
 
 	if (fast_ping_start_bind(type, ip, 1, 0, timeout, _dns_server_ping_result, request, &request->ping_bind) == NULL) {
 		return -1;
