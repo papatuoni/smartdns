@@ -22,6 +22,8 @@
 #include "dualstack.h"
 #include "request.h"
 
+#include "dns_conf/server_group.h"
+
 #include "smartdns/fast_ping.h"
 #include <errno.h>
 #include <string.h>
@@ -183,9 +185,70 @@ out:
 	}
 }
 
+/*
+ * 按 request 所属 group 推导测速包的出口绑定。
+ *
+ * 同一个 group 内所有上游 server 共享同一条物理出口，所以 bind 是 request 级的常量，
+ * 不需要 per-IP 追溯。未配置 -set-mark / -interface 时保持 bind 为"未绑定"，
+ * 测速包走默认路由，与改造前完全一致。
+ *
+ * 结果缓存在 request->ping_bind，避免每次探测都遍历配置。
+ */
+static void _dns_server_request_get_ping_bind(struct dns_request *request)
+{
+	struct dns_server_groups *group = NULL;
+	struct dns_servers *server = NULL;
+	int i = 0;
+	int found = 0;
+
+	request->ping_bind.so_mark = -1;
+	request->ping_bind.ifname[0] = '\0';
+
+	if (request == NULL || request->dns_group_name[0] == '\0') {
+		return;
+	}
+
+	group = _dns_conf_get_group(request->dns_group_name);
+	if (group == NULL) {
+		return;
+	}
+
+	for (i = 0; i < group->server_num; i++) {
+		server = group->servers[i];
+		if (server == NULL) {
+			continue;
+		}
+
+		if (server->set_mark < 0 && server->ifname[0] == '\0') {
+			continue;
+		}
+
+		if (found == 0) {
+			request->ping_bind.so_mark = server->set_mark;
+			safe_strncpy(request->ping_bind.ifname, server->ifname, sizeof(request->ping_bind.ifname));
+			found = 1;
+			continue;
+		}
+
+		/* 同组内多个 server 的出口不一致属于配置错误，取第一个并告警 */
+		if (server->set_mark != request->ping_bind.so_mark ||
+			strncmp(server->ifname, request->ping_bind.ifname, sizeof(request->ping_bind.ifname)) != 0) {
+			tlog(TLOG_WARN, "group %s has servers with different egress bind, use the first one.",
+				 request->dns_group_name);
+			break;
+		}
+	}
+}
+
 static int _dns_server_ping(struct dns_request *request, PING_TYPE type, char *ip, int timeout)
 {
 	if (fast_ping_start(type, ip, 1, 0, timeout, _dns_server_ping_result, request) == NULL) {
+		if (request->ping_bind_set == 0) {
+		_dns_server_request_get_ping_bind(request);
+		request->ping_bind_set = 1;
+	}
+
+	if (fast_ping_start_bind(type, ip, 1, 0, timeout, _dns_server_ping_result, request, &request->ping_bind) == NULL) {
 		return -1;
 	}
 
