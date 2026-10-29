@@ -19,6 +19,7 @@
 #ifndef _DNS_CLIENT_H_
 #define _DNS_CLIENT_H_
 
+#include <net/if.h>
 #include "smartdns/dns.h"
 #include "smartdns/dns_conf.h"
 #include "smartdns/dns_stats.h"
