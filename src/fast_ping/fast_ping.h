@@ -112,6 +112,8 @@ struct ping_host_struct {
 
 	int fd;
 	unsigned short seq;
+	/* 出口绑定，仅在有配置时生效；so_mark < 0 且 ifname 为空表示不绑定 */
+	struct ping_bind bind;
 	int ttl;
 	struct timeval last;
 	int interval;
@@ -189,6 +191,9 @@ extern struct fast_ping_struct ping;
 extern int bool_print_log;
 
 uint32_t _fast_ping_hash_key(unsigned int sid, struct sockaddr *addr);
+
+/* 将 ping_host 的出口绑定应用到 socket，必须在 connect()/sendto() 之前调用 */
+int fast_ping_bind_apply(int fd, const struct ping_bind *bind);
 
 struct addrinfo *_fast_ping_getaddr(const char *host, const char *port, int type, int protocol);
 
