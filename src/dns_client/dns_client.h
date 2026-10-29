@@ -84,6 +84,8 @@ struct dns_server_info {
 	/* server type */
 	dns_server_type_t type;
 	long long so_mark;
+	/* 双 WAN：该上游的出口接口名（-interface），与 so_mark 一起用于推导测速出口 */
+	char ifname[IFNAMSIZ];
 	int drop_packet_latency_ms;
 
 	/* client socket */
