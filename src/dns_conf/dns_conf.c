@@ -17,6 +17,7 @@
  */
 
 #include "smartdns/dns_conf.h"
+#include "smartdns/route_mgr.h"
 #include "smartdns/lib/idna.h"
 #include "smartdns/tlog.h"
 #include "smartdns/util.h"
@@ -157,6 +158,41 @@ static int _dns_conf_setup_mdns(void)
 	return _conf_domain_rule_nameserver(DNS_SERVER_GROUP_LOCAL, DNS_SERVER_GROUP_MDNS);
 }
 
+/*
+ * dualwan-egress <so_mark> <dev> [gateway]
+ * 把上游 server 配置的 -set-mark 映射到物理出口。
+ * gateway 省略表示点对点口（PPPoE），只绑设备。
+ * 例：
+ *   dualwan-egress 101 pppoe-wan
+ *   dualwan-egress 100 lan2 10.0.0.1
+ */
+static int _config_dualwan_egress(void *data, int argc, char *argv[])
+{
+	int so_mark = 0;
+	const char *dev = NULL;
+	const char *gw = NULL;
+
+	(void)data;
+
+	if (argc < 3) {
+		tlog(TLOG_ERROR, "dualwan-egress needs <so_mark> <dev> [gateway]");
+		return -1;
+	}
+
+	so_mark = atoi(argv[1]);
+	dev = argv[2];
+	if (argc > 3) {
+		gw = argv[3];
+	}
+
+	if (route_mgr_egress_set(so_mark, dev, gw) != 0) {
+		tlog(TLOG_ERROR, "dualwan-egress set failed: mark=%d dev=%s", so_mark, dev);
+		return -1;
+	}
+
+	return 0;
+}
+
 static int _config_server_name(void *data, int argc, char *argv[])
 {
 	if (argc <= 1) {
@@ -184,6 +220,7 @@ static struct config_item _config_item[] = {
 	CONF_CUSTOM("bind-cert-file", _config_option_parser_filepath, &dns_conf.bind_ca_file),
 	CONF_CUSTOM("bind-cert-key-file", _config_option_parser_filepath, &dns_conf.bind_ca_key_file),
 	CONF_STRING("bind-cert-key-pass", dns_conf.bind_ca_key_pass, DNS_MAX_PATH),
+	CONF_CUSTOM("dualwan-egress", _config_dualwan_egress, NULL),
 	CONF_CUSTOM("server", _config_server_udp, NULL),
 	CONF_CUSTOM("server-tcp", _config_server_tcp, NULL),
 	CONF_CUSTOM("server-tls", _config_server_tls, NULL),
