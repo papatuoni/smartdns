@@ -150,6 +150,13 @@ static int dns_server_resolve_callback(const char *domain, dns_result_type rtype
 		return -1;
 	}
 
+	src_bind.so_mark = -1;
+	src_bind.ifname[0] = '\0';
+	if (server_info != NULL) {
+		src_bind.so_mark = (int)server_info->so_mark;
+		safe_strncpy(src_bind.ifname, server_info->ifname, sizeof(src_bind.ifname));
+	}
+	
 	if (rtype == DNS_QUERY_RESULT) {
 		tlog(TLOG_DEBUG, "query result from server %s:%d, type: %d, domain: %s qtype: %d rcode: %d, id: %d",
 			 dns_client_get_server_ip(server_info), dns_client_get_server_port(server_info),
