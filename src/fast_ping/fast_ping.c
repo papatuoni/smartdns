@@ -218,8 +218,46 @@ int _fast_ping_get_addr_by_type(PING_TYPE type, const char *ip_str, int port, st
 	return -1;
 }
 
+/*
+ * 把出口绑定应用到探测 socket。
+ *
+ * 必须在 connect() / 首次 sendto() 之前调用 —— 路由决策发生在发包那一刻，之后设置无效。
+ *
+ * 返回 0 成功；bind 为 NULL 或 bind 内没有任何有效项时直接返回 0，且不调用任何 setsockopt，
+ * 这样"未配置 -set-mark / -interface"的场景与改造前行为完全一致。
+ */
+int fast_ping_bind_apply(int fd, const struct ping_bind *bind)
+{
+	if (bind == NULL) {
+		return 0;
+	}
+
+	if (bind->so_mark >= 0) {
+		unsigned int so_mark = (unsigned int)bind->so_mark;
+		if (setsockopt(fd, SOL_SOCKET, SO_MARK, &so_mark, sizeof(so_mark)) != 0) {
+			tlog(TLOG_WARN, "ping: set SO_MARK 0x%x failed, %s", so_mark, strerror(errno));
+			return -1;
+		}
+	}
+
+	if (bind->ifname[0] != '\0') {
+		/* 与 dns_client/client_udp.c 保持一致：用 struct ifreq 而非字符串 */
+		struct ifreq ifr;
+		memset(&ifr, 0, sizeof(ifr));
+		safe_strncpy(ifr.ifr_name, bind->ifname, sizeof(ifr.ifr_name));
+		if (setsockopt(fd, SOL_SOCKET, SO_BINDTODEVICE, (void *)&ifr, sizeof(ifr)) != 0) {
+			tlog(TLOG_WARN, "ping: bind socket to device %s failed, %s", bind->ifname, strerror(errno));
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
 struct ping_host_struct *fast_ping_start(PING_TYPE type, const char *host, int count, int interval, int timeout,
-										 fast_ping_result ping_callback, void *userptr)
+										 fast_ping_result ping_callback, void *userptr,
+										 const struct ping_bind *bind)
+										 
 {
 	struct ping_host_struct *ping_host = NULL;
 	struct addrinfo *gai = NULL;
@@ -250,6 +288,13 @@ struct ping_host_struct *fast_ping_start(PING_TYPE type, const char *host, int c
 	}
 	safe_strncpy(ping_host->host, host, PING_MAX_HOSTLEN);
 	ping_host->fd = -1;
+	/* 默认不绑定；仅当 bind 有效时才记录，保证未配置场景零行为变化 */
+	ping_host->bind.so_mark = -1;
+	ping_host->bind.ifname[0] = '\0';
+	if (bind != NULL) {
+		ping_host->bind.so_mark = bind->so_mark;
+		safe_strncpy(ping_host->bind.ifname, bind->ifname, sizeof(ping_host->bind.ifname));
+	}
 	ping_host->timeout = timeout;
 	ping_host->count = count;
 	ping_host->type = ping_type;
@@ -343,6 +388,16 @@ int fast_ping_stop(struct ping_host_struct *ping_host)
 	_fast_ping_host_remove(ping_host);
 	_fast_ping_host_put(ping_host);
 	return 0;
+}
+
+/*
+ * 无绑定版本：保持原有签名与行为。
+ * dualstack.c 里的 ipv6 就绪探测等内部调用点没有出口概念，必须走这里（bind = NULL）。
+ */
+struct ping_host_struct *fast_ping_start(PING_TYPE type, const char *host, int count, int interval, int timeout,
+										 fast_ping_result ping_callback, void *userptr)
+{
+	return fast_ping_start_bind(type, host, count, interval, timeout, ping_callback, userptr, NULL);
 }
 
 void tv_sub(struct timeval *out, struct timeval *in)
