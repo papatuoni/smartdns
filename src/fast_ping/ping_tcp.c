@@ -52,6 +52,18 @@ int _fast_ping_sendping_tcp(struct ping_host_struct *ping_host)
 	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
 	setsockopt(fd, SOL_SOCKET, SO_PRIORITY, &priority, sizeof(priority));
 	setsockopt(fd, IPPROTO_IP, IP_TOS, &ip_tos, sizeof(ip_tos));
+
+	/* 出口绑定：必须在 connect() 之前，否则路由已确定、设置无效。
+	 * 未配置时 fast_ping_bind_apply 不执行任何 setsockopt，走默认路由。 */
+	if (fast_ping_bind_apply(fd, &ping_host->bind) != 0) {
+		/* 绑定失败通常是权限不足（SO_MARK 需 CAP_NET_ADMIN，SO_BINDTODEVICE 需 CAP_NET_RAW）。
+		 * 降级为不绑定继续探测，而不是放弃 —— 否则所有探测都会失败，整个测速功能失效。
+		 * 把 mark 复位为 0，避免残留一个可能选错出口的半绑定状态。 */
+		unsigned int mark_zero = 0;
+		setsockopt(fd, SOL_SOCKET, SO_MARK, &mark_zero, sizeof(mark_zero));
+		tlog(TLOG_DEBUG, "bind egress failed, fallback to default route, host: %s", ping_host->host);
+	}
+	
 	set_sock_keepalive(fd, 0, 0, 0);
 	/* Set the socket lingering so we will RST connections instead of wasting
 	 * bandwidth with the four-step close
