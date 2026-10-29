@@ -231,6 +231,11 @@ struct dns_ip_address {
 	dns_type_t addr_type;
 	char cname[DNS_MAX_CNAME_LEN];
 	unsigned char ip_addr[DNS_RR_AAAA_LEN];
+	/* 双 WAN：本 IP 是从哪个上游（哪条线路）解析出来的。
+	 * src_bind_valid == 0 表示来源未知（hosts / dns64 / 上游未配 -set-mark），
+	 * 测速时回退到 request->ping_bind，行为与改造前一致。 */
+	struct ping_bind src_bind;
+	int src_bind_valid;
 };
 
 struct dns_request_pending_list {
