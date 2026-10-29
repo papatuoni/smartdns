@@ -52,6 +52,24 @@ const char *dns_client_get_server_ip(struct dns_server_info *server_info)
 	return server_info->ip;
 }
 
+long long dns_client_server_info_get_so_mark(struct dns_server_info *server_info)
+{
+	if (server_info == NULL) {
+		return -1;
+	}
+
+	return server_info->so_mark;
+}
+
+const char *dns_client_server_info_get_ifname(struct dns_server_info *server_info)
+{
+	if (server_info == NULL) {
+		return "";
+	}
+
+	return server_info->ifname;
+}
+
 dns_server_security_status dns_client_get_server_security_status(struct dns_server_info *server_info)
 {
 	if (server_info == NULL) {
