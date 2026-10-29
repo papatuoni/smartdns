@@ -25,6 +25,7 @@
 #include "dns_conf/server_group.h"
 
 #include "smartdns/fast_ping.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <string.h>
 
@@ -230,20 +231,97 @@ static void _dns_server_request_get_ping_bind(struct dns_request *request)
 			continue;
 		}
 
-		/* 同组内多个 server 的出口不一致属于配置错误，取第一个并告警 */
+		/*
+		 * 同组内多个 server 出口不同：双 WAN 下这是【正常用法】
+		 * （一个 group 里两个运营商 DNS 各带自己的 -set-mark / -interface）。
+		 * 每个候选 IP 会用自己来源 server 的出口测速，这里取到的值只作兜底，
+		 * 所以不再当配置错误告警，降为 debug。
+		 */
 		if (server->set_mark != request->ping_bind.so_mark ||
 			strncmp(server->ifname, request->ping_bind.ifname, sizeof(request->ping_bind.ifname)) != 0) {
-			tlog(TLOG_WARN, "group %s has servers with different egress bind, use the first one.",
+			tlog(TLOG_DEBUG, "group %s has servers with different egress bind, use the first as fallback.",
 				 request->dns_group_name);
 			break;
 		}
 	}
 }
 
+/*
+ * 把 "1.2.3.4" / "1.2.3.4:80" / "[fd00::1]" / "[fd00::1]:80" 还原成 ip_map 里的候选条目。
+ *
+ * 测速入口拿到的是字符串（ICMP 是裸 IP，TCP 带 :port，IPv6 还带方括号），
+ * 而 ip_map 的键是原始字节，所以要先剥掉端口和方括号再查表。
+ * 查不到就返回 NULL，调用方回退到 request 级出口，行为与改造前完全一致。
+ */
+static struct dns_ip_address *_dns_server_addr_map_by_ip_str(struct dns_request *request, const char *ip)
+{
+	char buf[DNS_MAX_CNAME_LEN] = {0};
+	const char *start = ip;
+	const char *end = NULL;
+	size_t len = 0;
+	struct in_addr in4;
+	struct in6_addr in6;
+
+	if (request == NULL || ip == NULL || ip[0] == '\0') {
+		return NULL;
+	}
+
+	if (ip[0] == '[') {
+		/* IPv6：[地址] 或 [地址]:端口 */
+		start = ip + 1;
+		end = strchr(start, ']');
+		if (end == NULL) {
+			return NULL;
+		}
+		len = (size_t)(end - start);
+		if (len == 0 || len >= sizeof(buf)) {
+			return NULL;
+		}
+		memcpy(buf, start, len);
+		buf[len] = '\0';
+		if (inet_pton(AF_INET6, buf, &in6) != 1) {
+			return NULL;
+		}
+		return _dns_ip_address_get(request, (unsigned char *)&in6, DNS_T_AAAA);
+	}
+
+	/* IPv4：地址 或 地址:端口 */
+	end = strchr(start, ':');
+	len = (end != NULL) ? (size_t)(end - start) : strlen(start);
+	if (len == 0 || len >= sizeof(buf)) {
+		return NULL;
+	}
+	memcpy(buf, start, len);
+	buf[len] = '\0';
+	if (inet_pton(AF_INET, buf, &in4) != 1) {
+		return NULL;
+	}
+	return _dns_ip_address_get(request, (unsigned char *)&in4, DNS_T_A);
+}
+
 static int _dns_server_ping(struct dns_request *request, PING_TYPE type, char *ip, int timeout)
 {
+	struct dns_ip_address *addr_map = NULL;
+	struct ping_bind *bind = NULL;
 
-	if (fast_ping_start_bind(type, ip, 1, 0, timeout, _dns_server_ping_result, request, &request->ping_bind) == NULL) {
+	if (request->ping_bind_set == 0) {
+		_dns_server_request_get_ping_bind(request);
+ 		request->ping_bind_set = 1;
+ 	}
+
+	/*
+	 * 双 WAN：优先用这个候选 IP 来源线路自己的出口，
+	 * 这样 A 线路的 IP 从 A 线路测、B 线路的 IP 从 B 线路测，各自得到真实延迟。
+	 * 来源未知（本地 hosts / dns64 / 上游未配 -set-mark）时回退到 request 级出口。
+	 */
+	addr_map = _dns_server_addr_map_by_ip_str(request, ip);
+	if (addr_map != NULL && addr_map->src_bind_valid) {
+		bind = &addr_map->src_bind;
+	} else {
+		bind = &request->ping_bind;
+	}
+
+	if (fast_ping_start_bind(type, ip, 1, 0, timeout, _dns_server_ping_result, request, bind) == NULL) {
 		return -1;
 	}
 
