@@ -25,6 +25,7 @@
 
 #include "smartdns/dns.h"
 #include "smartdns/dns_conf.h"
+#include "smartdns/fast_ping.h"
 #include "smartdns/dns_server.h"
 #include "smartdns/http2.h"
 #include "smartdns/tlog.h"
@@ -394,6 +395,10 @@ struct dns_request {
 	int skip_domain_rule;
 	const struct dns_domain_check_orders *check_order_list;
 	int check_order;
+
+	/* 测速包的出口绑定：由所属 group 的 server 配置（-set-mark / -interface）推导而来 */
+	struct ping_bind ping_bind;
+	int ping_bind_set;
 
 	enum response_mode_type response_mode;
 
