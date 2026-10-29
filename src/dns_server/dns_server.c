@@ -142,6 +142,9 @@ static int dns_server_resolve_callback(const char *domain, dns_result_type rtype
 	int ret = 0;
 	int need_passthrouh = 0;
 	unsigned long result_flag = dns_client_server_result_flag(server_info);
+	/* 双 WAN：本次应答来自哪个上游，就用那个上游的出口去测速。
+	 * 这样 A 线路的 IP 从 A 线路测、B 线路的 IP 从 B 线路测，各自拿到真实延迟。 */
+	struct ping_bind src_bind;
 
 	if (request == NULL) {
 		return -1;
@@ -183,7 +186,7 @@ static int dns_server_resolve_callback(const char *domain, dns_result_type rtype
 			}
 		}
 
-		ret = _dns_server_process_answer(request, domain, packet, result_flag, &need_passthrouh);
+		ret = _dns_server_process_answer(request, domain, packet, result_flag, &need_passthrouh, &src_bind);
 		if (ret == 0 && need_passthrouh == 1 && atomic_read(&request->notified) == 0) {
 			/* not supported record, passthrouth */
 			request->passthrough = 1;
