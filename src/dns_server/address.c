@@ -284,6 +284,28 @@ void _dns_server_select_possible_ipaddress(struct dns_request *request)
 	}
 }
 
+void _dns_ip_address_set_src_bind(struct dns_request *request, unsigned char *addr, dns_type_t addr_type,
+								  const struct ping_bind *bind)
+{
+	struct dns_ip_address *addr_map = NULL;
+
+	if (request == NULL || bind == NULL) {
+		return;
+	}
+
+	if (bind->so_mark < 0 && bind->ifname[0] == '\0') {
+		return; /* 上游未指定出口，保持 src_bind_valid = 0，测速回退到 request 级 */
+	}
+
+	pthread_mutex_lock(&request->ip_map_lock);
+	addr_map = _dns_ip_address_get(request, addr, addr_type);
+	if (addr_map != NULL) {
+		addr_map->src_bind = *bind;
+		addr_map->src_bind_valid = 1;
+	}
+	pthread_mutex_unlock(&request->ip_map_lock);
+}
+
 struct dns_ip_address *_dns_ip_address_get(struct dns_request *request, unsigned char *addr, dns_type_t addr_type)
 {
 	uint32_t key = 0;
