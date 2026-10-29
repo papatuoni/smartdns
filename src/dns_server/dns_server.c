@@ -55,6 +55,7 @@
 #include "smartdns/dns_stats.h"
 #include "smartdns/fast_ping.h"
 #include "smartdns/http_parse.h"
+#include "smartdns/route_mgr.h"
 #include "smartdns/lib/atomic.h"
 #include "smartdns/lib/hashtable.h"
 #include "smartdns/lib/list.h"
@@ -153,8 +154,8 @@ static int dns_server_resolve_callback(const char *domain, dns_result_type rtype
 	src_bind.so_mark = -1;
 	src_bind.ifname[0] = '\0';
 	if (server_info != NULL) {
-		src_bind.so_mark = (int)server_info->so_mark;
-		safe_strncpy(src_bind.ifname, server_info->ifname, sizeof(src_bind.ifname));
+		src_bind.so_mark = (int)dns_client_server_info_get_so_mark(server_info);
+		safe_strncpy(src_bind.ifname, dns_client_server_info_get_ifname(server_info), sizeof(src_bind.ifname));
 	}
 	
 	if (rtype == DNS_QUERY_RESULT) {
@@ -693,6 +694,11 @@ static void _dns_server_period_run_second(void)
 		}
 	}
 
+	/* 双 WAN 路由：全量校正 + 回收（30s 一轮） */
+	if (sec % 30 == 0) {
+		route_mgr_period_run();
+	}
+
 	_dns_server_save_cache_to_file();
 
 	dns_stats_period_run_second();
@@ -814,6 +820,12 @@ int dns_server_run(void)
 				continue;
 			}
 
+			/* dual-wan route event: 路由被他人删除 / 接口 up-down */
+			if (unlikely(event->data.fd == server.route_netlink_fd)) {
+				route_mgr_process_event(event->data.fd);
+				continue;
+			}
+
 			struct dns_server_conn_head *conn_head = event->data.ptr;
 			if (conn_head == NULL) {
 				tlog(TLOG_ERROR, "invalid fd\n");
@@ -900,6 +912,7 @@ int dns_server_init(void)
 
 	memset(&server, 0, sizeof(server));
 	server.neigh_netlink_fd = -1;
+	server.route_netlink_fd = -1;
 
 	pthread_mutexattr_init(&attr);
 	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
@@ -957,6 +970,13 @@ int dns_server_init(void)
 		goto errout;
 	}
 
+	/* 双 WAN 路由管理：未登记任何出口时内部直接不启用，行为与改造前一致 */
+	if (route_mgr_init(server.epoll_fd) == 0) {
+		server.route_netlink_fd = route_mgr_event_fd();
+	} else {
+		tlog(TLOG_WARN, "init route manager failed, dual-wan route disabled.");
+	}
+
 	is_server_init = 1;
 	return 0;
 errout:
@@ -997,6 +1017,8 @@ void dns_server_exit(void)
 	_dns_server_close_socket();
 	_dns_server_local_addr_cache_destroy();
 	_dns_server_neighbor_cache_remove_all();
+	route_mgr_exit();
+	server.route_netlink_fd = -1;
 	_dns_server_cache_save(0);
 	_dns_server_request_remove_all();
 	pthread_mutex_destroy(&server.request_list_lock);
