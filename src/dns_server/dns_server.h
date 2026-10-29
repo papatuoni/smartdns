@@ -427,6 +427,7 @@ struct dns_server {
 	int epoll_fd;
 	int event_fd;
 	int neigh_netlink_fd;
+	int route_netlink_fd; /* 双 WAN 路由管理事件 fd */
 	struct list_head conn_list;
 	pthread_mutex_t conn_list_lock;
 
