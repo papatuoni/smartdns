@@ -26,7 +26,7 @@ extern "C" {
 #endif /*__cplusplus */
 
 int _dns_server_process_answer(struct dns_request *request, const char *domain, struct dns_packet *packet,
-							   unsigned int result_flag, int *need_passthrouh);
+							   unsigned int result_flag, int *need_passthrouh, const struct ping_bind *src_bind);
 
 #ifdef __cplusplus
 }
