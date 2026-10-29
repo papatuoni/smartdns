@@ -28,7 +28,7 @@
 #include <math.h>
 
 static int _dns_server_process_answer_A_IP(struct dns_request *request, char *cname, unsigned char addr[4], int ttl,
-										   unsigned int result_flag)
+										   unsigned int result_flag, const struct ping_bind *src_bind)
 {
 	char ip[DNS_MAX_CNAME_LEN] = {0};
 	int ip_check_result = 0;
@@ -86,6 +86,9 @@ static int _dns_server_process_answer_A_IP(struct dns_request *request, char *cn
 			return -2;
 		}
 
+		/* 双 WAN：记住这个 IP 来自哪条线路，随后的测速就从那条线路发包 */
+		_dns_ip_address_set_src_bind(request, paddr, DNS_T_A, src_bind);
+
 		snprintf(ip, sizeof(ip), "%d.%d.%d.%d", paddr[0], paddr[1], paddr[2], paddr[3]);
 
 		/* start ping */
@@ -99,7 +102,7 @@ static int _dns_server_process_answer_A_IP(struct dns_request *request, char *cn
 }
 
 static int _dns_server_process_answer_AAAA_IP(struct dns_request *request, char *cname, unsigned char addr[16], int ttl,
-											  unsigned int result_flag)
+											  unsigned int result_flag, const struct ping_bind *src_bind)
 {
 	char ip[DNS_MAX_CNAME_LEN] = {0};
 	int ip_check_result = 0;
@@ -156,6 +159,9 @@ static int _dns_server_process_answer_AAAA_IP(struct dns_request *request, char 
 			return -2;
 		}
 
+		/* 双 WAN：记住这个 IP 来自哪条线路，随后的测速就从那条线路发包 */
+		_dns_ip_address_set_src_bind(request, paddr, DNS_T_AAAA, src_bind);
+
 		snprintf(ip, sizeof(ip), "[%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x]", paddr[0],
 				 paddr[1], paddr[2], paddr[3], paddr[4], paddr[5], paddr[6], paddr[7], paddr[8], paddr[9], paddr[10],
 				 paddr[11], paddr[12], paddr[13], paddr[14], paddr[15]);
@@ -171,7 +177,7 @@ static int _dns_server_process_answer_AAAA_IP(struct dns_request *request, char 
 }
 
 static int _dns_server_process_answer_A(struct dns_rrs *rrs, struct dns_request *request, const char *domain,
-										char *cname, unsigned int result_flag)
+										char *cname, unsigned int result_flag, const struct ping_bind *src_bind)
 {
 	int ttl = 0;
 	unsigned char addr[4];
@@ -192,14 +198,14 @@ static int _dns_server_process_answer_A(struct dns_rrs *rrs, struct dns_request 
 	}
 
 	_dns_server_request_get(request);
-	int ret = _dns_server_process_answer_A_IP(request, cname, addr, ttl, result_flag);
+	int ret = _dns_server_process_answer_A_IP(request, cname, addr, ttl, result_flag, src_bind);
 	_dns_server_request_release(request);
 
 	return ret;
 }
 
 static int _dns_server_process_answer_AAAA(struct dns_rrs *rrs, struct dns_request *request, const char *domain,
-										   char *cname, unsigned int result_flag)
+										   char *cname, unsigned int result_flag, const struct ping_bind *src_bind)
 {
 	unsigned char addr[16];
 
@@ -224,14 +230,14 @@ static int _dns_server_process_answer_AAAA(struct dns_rrs *rrs, struct dns_reque
 	}
 
 	_dns_server_request_get(request);
-	int ret = _dns_server_process_answer_AAAA_IP(request, cname, addr, ttl, result_flag);
+	int ret = _dns_server_process_answer_AAAA_IP(request, cname, addr, ttl, result_flag, src_bind);
 	_dns_server_request_release(request);
 
 	return ret;
 }
 
 static int _dns_server_process_answer_HTTPS(struct dns_rrs *rrs, struct dns_request *request, const char *domain,
-											char *cname, unsigned int result_flag)
+											char *cname, unsigned int result_flag, const struct ping_bind *src_bind)
 {
 	int ttl = 0;
 	int ret = -1;
@@ -305,7 +311,7 @@ static int _dns_server_process_answer_HTTPS(struct dns_rrs *rrs, struct dns_requ
 			}
 
 			for (int k = 0; k < p->len / 4; k++) {
-				_dns_server_process_answer_A_IP(request, cname, p->value + k * 4, ttl, result_flag);
+				_dns_server_process_answer_A_IP(request, cname, p->value + k * 4, ttl, result_flag, src_bind);
 			}
 		} break;
 		case DNS_HTTPS_T_ECH: {
@@ -340,7 +346,7 @@ static int _dns_server_process_answer_HTTPS(struct dns_rrs *rrs, struct dns_requ
 			}
 
 			for (int k = 0; k < p->len / 16; k++) {
-				_dns_server_process_answer_AAAA_IP(request, cname, p->value + k * 16, ttl, result_flag);
+				_dns_server_process_answer_AAAA_IP(request, cname, p->value + k * 16, ttl, result_flag, src_bind);
 			}
 		} break;
 		default:
@@ -354,7 +360,7 @@ static int _dns_server_process_answer_HTTPS(struct dns_rrs *rrs, struct dns_requ
 }
 
 int _dns_server_process_answer(struct dns_request *request, const char *domain, struct dns_packet *packet,
-							   unsigned int result_flag, int *need_passthrouh)
+							   unsigned int result_flag, int *need_passthrouh, const struct ping_bind *src_bind)
 {
 	int ttl = 0;
 	char name[DNS_MAX_CNAME_LEN] = {0};
@@ -389,7 +395,7 @@ int _dns_server_process_answer(struct dns_request *request, const char *domain, 
 			has_result = 1;
 			switch (rrs->type) {
 			case DNS_T_A: {
-				ret = _dns_server_process_answer_A(rrs, request, domain, cname, result_flag);
+				ret = _dns_server_process_answer_A(rrs, request, domain, cname, result_flag, src_bind);
 				if (ret == -1) {
 					break;
 				} else if (ret == -2) {
@@ -402,7 +408,7 @@ int _dns_server_process_answer(struct dns_request *request, const char *domain, 
 				is_rcode_set = 1;
 			} break;
 			case DNS_T_AAAA: {
-				ret = _dns_server_process_answer_AAAA(rrs, request, domain, cname, result_flag);
+				ret = _dns_server_process_answer_AAAA(rrs, request, domain, cname, result_flag, src_bind);
 				if (ret == -1) {
 					break;
 				} else if (ret == -2) {
@@ -438,7 +444,7 @@ int _dns_server_process_answer(struct dns_request *request, const char *domain, 
 				tlog(TLOG_DEBUG, "name: %s ttl: %d cname: %s\n", domain_name, ttl, cname);
 			} break;
 			case DNS_T_HTTPS: {
-				ret = _dns_server_process_answer_HTTPS(rrs, request, domain, cname, result_flag);
+				ret = _dns_server_process_answer_HTTPS(rrs, request, domain, cname, result_flag, src_bind);
 				if (ret == -1) {
 					break;
 				} else if (ret == -2) {
