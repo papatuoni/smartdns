@@ -24,6 +24,7 @@
 #include "dns_server.h"
 #include "ip_rule.h"
 #include "ipset_nftset.h"
+#include "smartdns/route_mgr.h"
 #include "request.h"
 #include "request_pending.h"
 #include "rules.h"
@@ -692,6 +693,18 @@ static int _dns_server_setup_ipset_nftset_packet(struct dns_server_post_context 
 				rule = ipset_rule_v4 ? ipset_rule_v4 : ipset_rule;
 				_dns_server_add_ipset_nftset(request, rule, nftset_ip, addr, DNS_RR_A_LEN, ipset_timeout_value,
 											 nftset_timeout_value);
+				/* 双 WAN：把最终选中的 IP 绑定到它「来源线路」的出口。
+				 * 用候选 IP 自己的 src_bind，而不是 request->ping_bind ——
+				 * 后者是整个查询共用的兜底出口，无法区分两个运营商的 IP。
+				 * 来源未知时（hosts / 上游未配 -set-mark）会自动回退，不写路由。 */
+				{
+					struct dns_ip_address *am = _dns_ip_address_get(request, addr, DNS_T_A);
+					struct ping_bind *rb = &request->ping_bind;
+					if (am != NULL && am->src_bind_valid) {
+						rb = &am->src_bind;
+					}
+					route_mgr_apply(addr, DNS_RR_A_LEN, rb);
+				}
 			} break;
 			case DNS_T_AAAA: {
 				unsigned char addr[16];
