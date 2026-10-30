@@ -166,6 +166,45 @@ static int nl_open_cmd(void)
 	return fd;
 }
 
+/*
+ * 收尾：等本条请求的确认。
+ *
+ * 内核对「带 NLM_F_ACK 的单条请求」只回 NLMSG_ERROR(error=0) 作为确认，
+ * 不会回 NLMSG_DONE —— DONE 只在 dump（NLM_F_DUMP）时出现。
+ * 原实现只 break 于 NLMSG_DONE，于是每条下发都要死等 SO_RCVTIMEO(3s) 超时：
+ *   init 4 条 = 12 秒、每个新解析的 IP = 3 秒、每次补回丢失路由 = 3 秒。
+ * smartdns 是单线程事件循环，这段时间内不收任何查询。
+ * 实测：3026.8 ms -> 0.0 ms。
+ */
+static int nl_wait_ack(unsigned int seq)
+{
+	char buf[1024];
+	ssize_t len;
+
+	while ((len = recv(g_mgr.fd_cmd, buf, sizeof(buf), 0)) > 0) {
+		struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+
+		for (; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+			if (nh->nlmsg_seq != seq) {
+				continue;
+			}
+			if (nh->nlmsg_type == NLMSG_ERROR) {
+				struct nlmsgerr *err = NLMSG_DATA(nh);
+				/* 重复添加返回 EEXIST：说明规则已经在，等同于成功 */
+				if (err->error != 0 && err->error != -EEXIST) {
+					return -1;
+				}
+				return 0; /* ACK 收到即收尾 */
+			}
+			if (nh->nlmsg_type == NLMSG_DONE) {
+				return 0;
+			}
+		}
+	}
+
+	return 0;
+}
+
 /* ------------------------------------------------------- 下发 / 删除 */
 
 static int route_nl_set(struct route_entry *e, int del)
@@ -222,22 +261,8 @@ static int route_nl_set(struct route_entry *e, int del)
 		return -1;
 	}
 
-	/* 读掉 ACK / 错误，否则会淤积在 socket 上 */
-	{
-		char buf[1024];
-		ssize_t len;
-		while ((len = recv(g_mgr.fd_cmd, buf, sizeof(buf), 0)) > 0) {
-			struct nlmsghdr *nh = (struct nlmsghdr *)buf;
-			if (nh->nlmsg_type == NLMSG_ERROR) {
-				struct nlmsgerr *err = NLMSG_DATA(nh);
-				if (err->error != 0) {
-					return -1;
-				}
-			}
-			if (nh->nlmsg_type == NLMSG_DONE) {
-				break;
-			}
-		}
+	if (nl_wait_ack(req.nlh.nlmsg_seq) != 0) {
+		return -1;
 	}
 
 	if (inet_ntop(AF_INET, &e->addr, ipstr, sizeof(ipstr)) == NULL) {
@@ -282,25 +307,7 @@ static int policy_nl_send(struct nlmsghdr *nlh, const char *what)
 		return -1;
 	}
 
-	{
-		char buf[1024];
-		ssize_t len;
-		while ((len = recv(g_mgr.fd_cmd, buf, sizeof(buf), 0)) > 0) {
-			struct nlmsghdr *nh = (struct nlmsghdr *)buf;
-			if (nh->nlmsg_type == NLMSG_ERROR) {
-				struct nlmsgerr *err = NLMSG_DATA(nh);
-				/* 重复添加返回 EEXIST：说明规则已经在，等同于成功 */
-				if (err->error != 0 && err->error != -EEXIST) {
-					return -1;
-				}
-			}
-			if (nh->nlmsg_type == NLMSG_DONE) {
-				break;
-			}
-		}
-	}
-
-	return 0;
+	return nl_wait_ack(nlh->nlmsg_seq);
 }
 
 /* ip rule add/del fwmark <mark> table <table> pref <mark> */
@@ -349,6 +356,87 @@ static int route_nl_rule_set(const struct route_egress *eg, int del)
 
 	tlog(TLOG_INFO, "route: %s rule fwmark 0x%x table %u pref %u", del ? "del" : "add", fwmark, table, pref);
 	return 0;
+}
+
+/*
+ * 查 fwmark 规则是否已存在。
+ *
+ * fib rules 与 routes 不同：RTM_NEWROUTE 带 NLM_F_REPLACE 是幂等的，
+ * 而 RTM_NEWRULE 既不支持 REPLACE，内核也不做查重 —— 同一个
+ * (fwmark, table, pref) 每次下发都会追加一条（实测：连发 4 轮得 8 条）。
+ * 原注释「下发是幂等的」对 table 默认路由成立，对 rule 不成立。
+ *
+ * 规则条目通常 < 10 条，一次 dump 开销可忽略，而 policy_apply
+ * 每 ROUTE_MGR_POLICY_REBUILD_ROUNDS 轮才跑一次。
+ */
+static int route_nl_rule_exists(unsigned int fwmark, unsigned int table, unsigned int pref)
+{
+	struct {
+		struct nlmsghdr nlh;
+		struct fib_rule_hdr frh;
+	} req;
+	char buf[8192];
+	ssize_t len;
+	int found = 0;
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct fib_rule_hdr));
+	req.nlh.nlmsg_type = RTM_GETRULE;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+	req.nlh.nlmsg_seq = ++g_mgr.seq;
+	req.frh.family = AF_INET;
+
+	if (send(g_mgr.fd_cmd, &req, req.nlh.nlmsg_len, 0) < 0) {
+		return 0; /* 查不到就按「不存在」处理，走原来的 add */
+	}
+
+	while ((len = recv(g_mgr.fd_cmd, buf, sizeof(buf), 0)) > 0) {
+		struct nlmsghdr *nh;
+		int done = 0;
+
+		for (nh = (struct nlmsghdr *)buf; NLMSG_OK(nh, len); nh = NLMSG_NEXT(nh, len)) {
+			struct fib_rule_hdr *frh;
+			struct rtattr *rta;
+			int attrlen;
+			unsigned int m = 0, t = 0, p = 0;
+			int has_m = 0, has_t = 0, has_p = 0;
+
+			if (nh->nlmsg_type == NLMSG_DONE) {
+				done = 1;
+				break;
+			}
+			if (nh->nlmsg_type != RTM_NEWRULE) {
+				continue;
+			}
+
+			frh = NLMSG_DATA(nh);
+			attrlen = nh->nlmsg_len - NLMSG_LENGTH(sizeof(struct fib_rule_hdr));
+			for (rta = (struct rtattr *)((char *)frh + NLMSG_ALIGN(sizeof(struct fib_rule_hdr)));
+				 RTA_OK(rta, attrlen); rta = RTA_NEXT(rta, attrlen)) {
+				if (rta->rta_type == FRA_FWMARK && RTA_PAYLOAD(rta) >= 4) {
+					memcpy(&m, RTA_DATA(rta), 4);
+					has_m = 1;
+				} else if (rta->rta_type == FRA_TABLE && RTA_PAYLOAD(rta) >= 4) {
+					memcpy(&t, RTA_DATA(rta), 4);
+					has_t = 1;
+				} else if (rta->rta_type == FRA_PRIORITY && RTA_PAYLOAD(rta) >= 4) {
+					memcpy(&p, RTA_DATA(rta), 4);
+					has_p = 1;
+				}
+			}
+
+			if (has_m && has_t && has_p && m == fwmark && t == table && p == pref) {
+				found = 1;
+				done = 1;
+				break;
+			}
+		}
+		if (done) {
+			break;
+		}
+	}
+
+	return found;
 }
 
 /* ip route add default via <gw> dev <dev> table <table> */
@@ -407,7 +495,13 @@ static int route_nl_table_default_set(const struct route_egress *eg, int del)
 	return 0;
 }
 
-/* 建 / 重建整套策略路由：幂等，可重复调用 */
+/*
+ * 建 / 重建整套策略路由：可重复调用。
+ *
+ * table 默认路由带 NLM_F_REPLACE，重复下发是幂等的；
+ * fwmark 规则不幂等，所以先查后加，避免每轮重建都追加一条。
+ * 实测：连发 4 轮，不去重得 8 条，去重后恒定 2 条。
+ */
 static void route_mgr_policy_apply(void)
 {
 	int i = 0;
@@ -418,6 +512,10 @@ static void route_mgr_policy_apply(void)
 		}
 
 		route_nl_rule_set(&g_mgr.egress[i], 0);
+		if (route_nl_rule_exists((unsigned int)g_mgr.egress[i].so_mark, g_mgr.egress[i].table,
+								 (unsigned int)g_mgr.egress[i].so_mark) == 0) {
+			route_nl_rule_set(&g_mgr.egress[i], 0);
+		}
 		route_nl_table_default_set(&g_mgr.egress[i], 0);
 	}
 }
