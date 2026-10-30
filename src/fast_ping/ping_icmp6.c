@@ -64,12 +64,19 @@ int _fast_ping_sendping_v6(struct ping_host_struct *ping_host)
 	struct fast_ping_packet *packet = &ping_host->packet;
 	struct icmp6_hdr *icmp6 = &packet->icmp6;
 	int len = 0;
+	int fd = -1;
 
 	if (_fast_ping_icmp_create_socket(ping_host) < 0) {
 		goto errout;
 	}
 
-	if (ping.fd_icmp6 <= 0) {
+	if (_fast_ping_bind_is_valid(&ping_host->bind)) {
+		fd = _fast_ping_icmp_bind_fd(FAST_PING_ICMP6, &ping_host->bind);
+	} else {
+		fd = ping.fd_icmp6;
+	}
+
+	if (fd <= 0) {
 		errno = EADDRNOTAVAIL;
 		goto errout;
 	}
@@ -88,7 +95,7 @@ int _fast_ping_sendping_v6(struct ping_host_struct *ping_host)
 	packet->msg.seq = ping_host->seq;
 	icmp6->icmp6_cksum = _fast_ping_checksum((void *)packet, sizeof(struct fast_ping_packet));
 
-	len = sendto(ping.fd_icmp6, &ping_host->packet, sizeof(struct fast_ping_packet), 0, &ping_host->addr,
+	len = sendto(fd, &ping_host->packet, sizeof(struct fast_ping_packet), 0, &ping_host->addr,
 				 ping_host->addr_len);
 	if (len != sizeof(struct fast_ping_packet)) {
 		int err = errno;
