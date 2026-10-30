@@ -665,10 +665,123 @@ static void route_dump_adopt(void)
 /* --------------------------------------------------------- conntrack */
 
 /*
- * 二级判据：这个 IP 还有没有连接在用。
  * 内核不同版本对 IPv4 的打印格式不一致（点分十进制 或 十六进制），
  * 所以两种都找，避免误判。
  */
+#define CT_HASH_BITS 8192 /* 2^13，连接数 * 2 远小于此即可 */
+
+struct ct_node {
+	struct in_addr addr;
+	struct ct_node *next;
+};
+
+static struct ct_node *ct_tab[CT_HASH_BITS];
+static int ct_valid = 0; /* 快照是否成功；失败时一律保守返回 1 */
+
+static unsigned int ct_hash(const struct in_addr *a)
+{
+	unsigned int h = 2166136261u;
+	const unsigned char *b = (const unsigned char *)&a->s_addr;
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		h ^= b[i];
+		h *= 16777619u;
+	}
+	return h & (CT_HASH_BITS - 1);
+}
+
+static void ct_free(void)
+{
+	int i;
+	for (i = 0; i < CT_HASH_BITS; i++) {
+		struct ct_node *n = ct_tab[i];
+		while (n) {
+			struct ct_node *nx = n->next;
+			free(n);
+			n = nx;
+		}
+		ct_tab[i] = NULL;
+	}
+}
+
+/* 一轮 GC 调一次：把 /proc/net/nf_conntrack 里的 IPv4 收成集合 */
+static void ct_snapshot(void)
+{
+	FILE *fp;
+	char line[1024];
+
+	ct_free();
+	ct_valid = 0;
+
+	if (g_mgr.test_no_conntrack) {
+		return;
+	}
+
+	fp = fopen("/proc/net/nf_conntrack", "r");
+	if (fp == NULL) {
+		return; /* 读不到：保持 ct_valid = 0，走保守分支 */
+	}
+
+	while (fgets(line, sizeof(line), fp)) {
+		char *p = line;
+		for (;;) {
+			char *s1 = strstr(p, "src=");
+			char *s2 = strstr(p, "dst=");
+			char *t;
+			char ip[64];
+			int i = 0;
+			struct in_addr a;
+
+			if (s1 && s2) {
+				t = (s1 < s2) ? s1 : s2;
+			} else {
+				t = s1 ? s1 : s2;
+			}
+			if (t == NULL) {
+				break;
+			}
+			t += 4;
+			while (*t && *t != ' ' && *t != '\n' && i < 63) {
+				ip[i++] = *t++;
+			}
+			ip[i] = '\0';
+
+			/* 只收点分十进制；十六进制格式的内核在 dump 里同样是 src=/dst= */
+			if (inet_pton(AF_INET, ip, &a) == 1) {
+				unsigned int h = ct_hash(&a);
+				struct ct_node *n = malloc(sizeof(*n));
+				if (n != NULL) {
+					n->addr = a;
+					n->next = ct_tab[h];
+					ct_tab[h] = n;
+				}
+			}
+			p = t;
+		}
+	}
+	fclose(fp);
+	ct_valid = 1;
+}
+
+/* 快照里有没有这个 IP */
+static int ct_lookup(const struct in_addr *a)
+{
+	unsigned int h;
+	struct ct_node *n;
+
+	if (!ct_valid) {
+		return 1; /* 保守：快照失败，认为还在用，绝不误删 */
+	}
+	h = ct_hash(a);
+	for (n = ct_tab[h]; n; n = n->next) {
+		if (n->addr.s_addr == a->s_addr) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static int conntrack_has(const struct in_addr *a)
 {
 	FILE *fp;
@@ -730,12 +843,13 @@ static void route_gc(void)
 		return;
 	}
 
-	/* 二级：只对候选查 conntrack */
+	/* 二级：只对候选查 conntrack（一轮只 dump 一次，O(1) 查快照） */
+	ct_snapshot();
 	for (i = 0; i < pending_num; i++) {
 		struct route_entry *e = pending[i];
 		char ipstr[INET_ADDRSTRLEN];
 
-		if (conntrack_has(&e->addr)) {
+		if (ct_lookup(&e->addr)) {
 			e->idle_rounds = 0; /* 还在用，宽限重置 */
 			continue;
 		}
@@ -1050,6 +1164,8 @@ int route_mgr_init(int epoll_fd)
 
 void route_mgr_exit(void)
 {
+	ct_free();
+	
 	if (g_mgr.fd_cmd >= 0) {
 		close(g_mgr.fd_cmd);
 		g_mgr.fd_cmd = -1;
