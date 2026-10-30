@@ -139,6 +139,30 @@ struct ping_host_struct {
 	int fake_time_fd;
 };
 
+/*
+ * 按出口绑定的 ICMP / ICMP6 socket 池。
+ *
+ * 背景：ICMP 探测用的是 ping.fd_icmp 这一个【全局共享】socket，
+ * 无法像 TCP 那样在 per-host socket 上 setsockopt(SO_MARK/SO_BINDTODEVICE)，
+ * 所以双 WAN 下 ICMP 测速包永远走默认路由，测出来的延迟是错的。
+ *
+ * 解决：给每个不同的出口绑定组合单独开一个 ICMP socket。
+ * 组合数等于物理出口数（双 WAN 就是 2），数量可控。
+ *
+ * 收包端不需要改：ICMP 应答是靠 payload 里的 sid 回表找 ping_host 的
+ * （见 ping_icmp.c:_fast_ping_process_icmp），与从哪个 socket 收到无关。
+ * 所以只要把池里的 socket 也注册进 epoll、data.ptr 指向池内嵌的 owner，
+ * 接收逻辑自动生效。
+ */
+#define PING_BIND_MAX 8
+
+struct ping_bind_sock {
+	int fd;		  /* -1 表示槽位未使用 */
+	int in_use;	  /* 槽位占用标记 */
+	struct ping_bind bind;
+	struct ping_host_struct host; /* epoll 的 owner，仅用于收包分发 */
+};
+
 struct fast_ping_notify_event {
 	struct list_head list;
 	struct ping_host_struct *ping_host;
@@ -175,6 +199,10 @@ struct fast_ping_struct {
 	uint16_t tcp_syn6_bind_port;
 	struct sockaddr_in6 tcp_syn6_bind_addr;
 
+	/* 按出口绑定的 ICMP socket 池（见 struct ping_bind_sock 注释） */
+	struct ping_bind_sock icmp_bind[PING_BIND_MAX];
+	struct ping_bind_sock icmp6_bind[PING_BIND_MAX];
+
 	int event_fd;
 	pthread_t notify_tid;
 	pthread_cond_t notify_cond;
@@ -195,6 +223,17 @@ uint32_t _fast_ping_hash_key(unsigned int sid, struct sockaddr *addr);
 /* 将 ping_host 的出口绑定应用到 socket，必须在 connect()/sendto() 之前调用 */
 int fast_ping_bind_apply(int fd, const struct ping_bind *bind);
 
+/* bind 里是否含有有效出口信息（mark 或 ifname 任一有效即算） */
+int _fast_ping_bind_is_valid(const struct ping_bind *bind);
+
+/*
+ * 取「绑定到指定出口」的 ICMP / ICMP6 socket fd，没有就创建一个放进池。
+ * 失败返回 -1，调用方应当按原逻辑报错，不要退化成无绑定 socket ——
+ * 那样测出来的延迟属于错误出口，比失败更糟。
+ */
+
+int _fast_ping_icmp_bind_fd(FAST_PING_TYPE type, const struct ping_bind *bind);
+	
 struct addrinfo *_fast_ping_getaddr(const char *host, const char *port, int type, int protocol);
 
 int _fast_ping_get_addr_by_type(PING_TYPE type, const char *ip_str, int port, struct addrinfo **out_gai,
