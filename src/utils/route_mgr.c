@@ -29,6 +29,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <linux/fib_rules.h>
 #include <linux/rtnetlink.h>
 #include <net/if.h>
 #include <stdio.h>
@@ -47,6 +48,8 @@
 #define ROUTE_MGR_DNS_IDLE_SEC 300
 /* 连续多少轮既无 DNS 引用又无连接，才真正删除 */
 #define ROUTE_MGR_GC_IDLE_ROUNDS 3
+/* 每多少轮重建一次策略路由（ip rule + table 默认路由），防事件漏收 */
+#define ROUTE_MGR_POLICY_REBUILD_ROUNDS 10
 /* 路由标记：只认自己加的，不碰 netifd / kernel 的 */
 #define ROUTE_MGR_PROTO RTPROT_BOOT
 
@@ -243,6 +246,180 @@ static int route_nl_set(struct route_entry *e, int del)
 	tlog(TLOG_DEBUG, "route: %s %s -> %s", del ? "del" : "set", ipstr, eg->dev);
 
 	return 0;
+}
+
+/* ------------------------------------------------- 策略路由（替代外部脚本）
+ *
+ * 为什么做在这里：
+ *   「让电信 DNS 的查询包从电信口出去」靠的是 ip rule fwmark N table N +
+ *   table N 里的默认路由。过去这一步是外部脚本做的，刷机 / PPPoE 重拨后就丢了，
+ *   smartdns 却还在按 mark 发包 —— 于是电信 DNS 从移动口出去，必然超时。
+ *
+ *   把 ip rule 和 table 默认路由也交给 route_mgr 下发，就随进程一起存在：
+ *     - init 时建一次
+ *     - 收到 RTM_NEWLINK（接口 up / PPPoE 重拨）时重建
+ *   不依赖任何外部脚本，也不需要 hotplug。
+ *
+ *   表号取 so_mark（dualwan-egress 100 → table 100），与运维习惯一致；
+ *   超出 u8 范围时退化为 100+序号。
+ */
+
+static unsigned int egress_table_id(int idx)
+{
+	int so_mark = g_mgr.egress[idx].so_mark;
+
+	if (so_mark > 0 && so_mark <= 252) {
+		return (unsigned int)so_mark;
+	}
+
+	return (unsigned int)(100 + idx);
+}
+
+static int policy_nl_send(struct nlmsghdr *nlh, const char *what)
+{
+	if (send(g_mgr.fd_cmd, nlh, nlh->nlmsg_len, 0) < 0) {
+		tlog(TLOG_DEBUG, "route: %s send failed, %s", what, strerror(errno));
+		return -1;
+	}
+
+	{
+		char buf[1024];
+		ssize_t len;
+		while ((len = recv(g_mgr.fd_cmd, buf, sizeof(buf), 0)) > 0) {
+			struct nlmsghdr *nh = (struct nlmsghdr *)buf;
+			if (nh->nlmsg_type == NLMSG_ERROR) {
+				struct nlmsgerr *err = NLMSG_DATA(nh);
+				/* 重复添加返回 EEXIST：说明规则已经在，等同于成功 */
+				if (err->error != 0 && err->error != -EEXIST) {
+					return -1;
+				}
+			}
+			if (nh->nlmsg_type == NLMSG_DONE) {
+				break;
+			}
+		}
+	}
+
+	return 0;
+}
+
+/* ip rule add/del fwmark <mark> table <table> pref <mark> */
+static int route_nl_rule_set(const struct route_egress *eg, int del)
+{
+	struct {
+		struct nlmsghdr nlh;
+		struct fib_rule_hdr frh;
+		char buf[256];
+	} req;
+	unsigned int table = 0;
+	unsigned int fwmark = 0;
+	unsigned int pref = 0;
+	unsigned int fwmask = 0xFFFFFFFF;
+
+	if (eg == NULL || eg->so_mark <= 0) {
+		return -1;
+	}
+
+	table = eg->table;
+	fwmark = (unsigned int)eg->so_mark;
+	/* 优先级必须小于 main 的 32766，否则包先查 main 就走了，规则形同虚设 */
+	pref = fwmark;
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct fib_rule_hdr));
+	req.nlh.nlmsg_type = del ? RTM_DELRULE : RTM_NEWRULE;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	if (!del) {
+		req.nlh.nlmsg_flags |= NLM_F_CREATE;
+	}
+	req.nlh.nlmsg_seq = ++g_mgr.seq;
+
+	req.frh.family = AF_INET;
+	req.frh.action = FR_ACT_TO_TBL;
+	req.frh.table = RT_TABLE_UNSPEC; /* 表号走 FRA_TABLE 属性，支持 >255 */
+
+	nl_add_attr(&req.nlh, sizeof(req), FRA_FWMARK, &fwmark, sizeof(fwmark));
+	nl_add_attr(&req.nlh, sizeof(req), FRA_FWMASK, &fwmask, sizeof(fwmask));
+	nl_add_attr(&req.nlh, sizeof(req), FRA_TABLE, &table, sizeof(table));
+	nl_add_attr(&req.nlh, sizeof(req), FRA_PRIORITY, &pref, sizeof(pref));
+
+	if (policy_nl_send(&req.nlh, del ? "del rule" : "add rule") != 0) {
+		return -1;
+	}
+
+	tlog(TLOG_INFO, "route: %s rule fwmark 0x%x table %u pref %u", del ? "del" : "add", fwmark, table, pref);
+	return 0;
+}
+
+/* ip route add default via <gw> dev <dev> table <table> */
+static int route_nl_table_default_set(const struct route_egress *eg, int del)
+{
+	struct {
+		struct nlmsghdr nlh;
+		struct rtmsg rtm;
+		char buf[256];
+	} req;
+	unsigned int oif = 0;
+	unsigned int table = 0;
+
+	if (eg == NULL) {
+		return -1;
+	}
+
+	oif = if_nametoindex(eg->dev);
+	if (oif == 0) {
+		tlog(TLOG_DEBUG, "route: table default, dev %s not present, skip", eg->dev);
+		return -1;
+	}
+	table = eg->table;
+
+	memset(&req, 0, sizeof(req));
+	req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+	req.nlh.nlmsg_type = del ? RTM_DELROUTE : RTM_NEWROUTE;
+	req.nlh.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+	if (!del) {
+		req.nlh.nlmsg_flags |= NLM_F_CREATE | NLM_F_REPLACE;
+	}
+	req.nlh.nlmsg_seq = ++g_mgr.seq;
+
+	req.rtm.rtm_family = AF_INET;
+	req.rtm.rtm_dst_len = 0; /* 默认路由 */
+	req.rtm.rtm_src_len = 0;
+	req.rtm.rtm_table = RT_TABLE_UNSPEC;
+	req.rtm.rtm_protocol = ROUTE_MGR_PROTO;
+	req.rtm.rtm_scope = RT_SCOPE_UNIVERSE;
+	req.rtm.rtm_type = RTN_UNICAST;
+
+	nl_add_attr(&req.nlh, sizeof(req), RTA_TABLE, &table, sizeof(table));
+	if (!del) {
+		if (eg->has_gw) {
+			nl_add_attr(&req.nlh, sizeof(req), RTA_GATEWAY, &eg->gw, 4);
+		}
+		nl_add_attr(&req.nlh, sizeof(req), RTA_OIF, &oif, 4);
+	}
+
+	if (policy_nl_send(&req.nlh, del ? "del table default" : "add table default") != 0) {
+		return -1;
+	}
+
+	tlog(TLOG_INFO, "route: %s table %u default dev %s%s", del ? "del" : "add", table, eg->dev,
+		 eg->has_gw ? " via gw" : "");
+	return 0;
+}
+
+/* 建 / 重建整套策略路由：幂等，可重复调用 */
+static void route_mgr_policy_apply(void)
+{
+	int i = 0;
+
+	for (i = 0; i < g_mgr.egress_num; i++) {
+		if (g_mgr.egress[i].so_mark <= 0) {
+			continue;
+		}
+
+		route_nl_rule_set(&g_mgr.egress[i], 0);
+		route_nl_table_default_set(&g_mgr.egress[i], 0);
+	}
 }
 
 /* ------------------------------------------------------------ dump 解析 */
@@ -508,6 +685,7 @@ int route_mgr_egress_set(int so_mark, const char *dev, const char *gw)
 
 	i = g_mgr.egress_num;
 	g_mgr.egress[i].so_mark = so_mark;
+	g_mgr.egress[i].table = 0;
 	snprintf(g_mgr.egress[i].dev, sizeof(g_mgr.egress[i].dev), "%s", dev);
 	g_mgr.egress[i].has_gw = 0;
 	if (gw != NULL && inet_pton(AF_INET, gw, &g_mgr.egress[i].gw) == 1) {
@@ -530,13 +708,29 @@ int route_mgr_apply(const unsigned char *addr, int addr_len, const struct ping_b
 		return 0;
 	}
 
-	/* 按来源线路的 mark 找出口 */
-	for (i = 0; i < g_mgr.egress_num; i++) {
-		if (g_mgr.egress[i].so_mark == bind->so_mark) {
-			eg_idx = i;
-			break;
+	/* 优先按来源线路的 mark 找出口 */
+	if (bind->so_mark >= 0) {
+		for (i = 0; i < g_mgr.egress_num; i++) {
+			if (g_mgr.egress[i].so_mark == bind->so_mark) {
+				eg_idx = i;
+				break;
+			}
 		}
 	}
+
+	/*
+	 * mark 没配上（上游只写了 -interface、没写 -set-mark）时按设备名兜底，
+	 * 否则这类来源会被当成「未知」而不写路由，双 WAN 白白少一半出口。
+	 */
+	if (eg_idx < 0 && bind->ifname[0] != '\0') {
+		for (i = 0; i < g_mgr.egress_num; i++) {
+			if (strncmp(g_mgr.egress[i].dev, bind->ifname, IFNAMSIZ) == 0) {
+				eg_idx = i;
+				break;
+			}
+ 		}
+ 	}
+	
 	if (eg_idx < 0) {
 		/* 来源未知（hosts / 未配 mark）→ 不写路由，交给默认路由 */
 		return 0;
@@ -616,6 +810,12 @@ void route_mgr_process_event(int fd)
 				struct ifinfomsg *ifi = NLMSG_DATA(nh);
 				int i;
 
+				/*
+				 * 接口 down 时内核会静默清掉该接口的 table 默认路由，
+				 * up 后不会自动回来。这里重建整套策略路由（幂等）。
+				 */
+				route_mgr_policy_apply();
+
 				for (i = 0; i < ROUTE_MGR_HASH_SIZE; i++) {
 					struct route_entry *e = g_mgr.hash[i];
 					for (; e; e = e->next) {
@@ -642,6 +842,15 @@ void route_mgr_period_run(void)
 	}
 
 	g_mgr.gc_rounds++;
+
+	/*
+	 * 策略路由兜底：接口事件有可能漏（netlink 组播丢消息、启动时序竞争），
+	 * 每 ROUTE_MGR_POLICY_REBUILD_ROUNDS 轮重建一次。下发是幂等的，
+	 * 代价是几条 netlink 报文，可忽略。
+	 */
+	if (g_mgr.gc_rounds % ROUTE_MGR_POLICY_REBUILD_ROUNDS == 0) {
+		route_mgr_policy_apply();
+	}
 
 	/* 全量校正：内部表是「缓存」，真相在内核，定期用 dump 对齐 */
 	route_dump_adopt();
@@ -689,9 +898,10 @@ int route_mgr_init(int epoll_fd)
 	g_mgr.fd_cmd = -1;
 	g_mgr.fd_event = -1;
 
-	/* 配置期可能早于接口就绪，这里重查一次 ifindex */
+	/* 配置期可能早于接口就绪，这里重查一次 ifindex，并定下策略路由表号 */
 	for (i = 0; i < g_mgr.egress_num; i++) {
 		g_mgr.egress[i].ifindex = if_nametoindex(g_mgr.egress[i].dev);
+		g_mgr.egress[i].table = egress_table_id(i);
 	}
 
 	/* 没有登记任何出口就不启用，行为与改造前完全一致 */
@@ -731,6 +941,9 @@ int route_mgr_init(int epoll_fd)
 
 	g_mgr.enabled = 1;
 
+	/* 策略路由：ip rule + 各 table 的默认路由，替代外部脚本 */
+	route_mgr_policy_apply();
+	
 	/* 启动收养：把内核里已有的路由接进来，避免重启后变孤儿 */
 	route_dump_adopt();
 
