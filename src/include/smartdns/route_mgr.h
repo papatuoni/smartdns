@@ -21,6 +21,7 @@
 struct route_egress {
 	int so_mark;
 	char dev[IFNAMSIZ];
+	unsigned int table; /* 策略路由表号，默认取 so_mark；由 route_mgr 自行下发，无需外部脚本 */
 	struct in_addr gw; /* 网络序；点对点口（PPPoE）不需要 */
 	int has_gw;
 	unsigned int ifindex; /* 每次下发前重查，接口删除重建会变 */
