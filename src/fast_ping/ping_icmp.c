@@ -61,11 +61,23 @@ static void _fast_ping_install_filter_v4(int sock)
 
 int _fast_ping_sendping_v4(struct ping_host_struct *ping_host)
 {
+	int fd = -1;
+	
 	if (_fast_ping_icmp_create_socket(ping_host) < 0) {
 		goto errout;
 	}
 
-	if (ping.fd_icmp <= 0) {
+	/*
+	 * 双 WAN：有出口绑定时必须用「绑定了该出口」的独立 socket，
+	 * 否则探测包走默认路由，测到的延迟属于错误线路，选出来的 IP 也就是错的。
+	 */
+	if (_fast_ping_bind_is_valid(&ping_host->bind)) {
+		fd = _fast_ping_icmp_bind_fd(FAST_PING_ICMP, &ping_host->bind);
+	} else {
+		fd = ping.fd_icmp;
+	}
+
+	if (fd <= 0) {
 		errno = EADDRNOTAVAIL;
 		goto errout;
 	}
@@ -88,7 +100,7 @@ int _fast_ping_sendping_v4(struct ping_host_struct *ping_host)
 	packet->msg.seq = ping_host->seq;
 	icmp->icmp_cksum = _fast_ping_checksum((void *)packet, sizeof(struct fast_ping_packet));
 
-	len = sendto(ping.fd_icmp, packet, sizeof(struct fast_ping_packet), 0, &ping_host->addr, ping_host->addr_len);
+	len = sendto(fd, packet, sizeof(struct fast_ping_packet), 0, &ping_host->addr, ping_host->addr_len);
 	if (len != sizeof(struct fast_ping_packet)) {
 		int err = errno;
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -110,10 +122,21 @@ errout:
 	return -1;
 }
 
-static int _fast_ping_create_icmp_sock(FAST_PING_TYPE type)
+/*
+ * 创建 ICMP / ICMP6 socket。
+ *
+ * owner 为 NULL 时使用全局的 ping.icmp_host / ping.icmp6_host（原有行为）；
+ * 传入 owner 则是「按出口绑定」的独立 socket，其 data.ptr 指向 owner，
+ * 收包分发走同一套 _fast_ping_process_icmp()，靠 payload 里的 sid 回表。
+ *
+ * bind 非空时在注册 epoll 之前完成 SO_MARK / SO_BINDTODEVICE ——
+ * 路由决策发生在发包那一刻，设置晚于第一个包就等于没设置。
+ */
+int _fast_ping_create_icmp_sock_ex(FAST_PING_TYPE type, struct ping_host_struct *owner,
+								   const struct ping_bind *bind)
 {
 	int fd = -1;
-	struct ping_host_struct *icmp_host = NULL;
+	struct ping_host_struct *icmp_host = owner;
 	struct epoll_event event;
 	/* Set receive and send buffer to 512KB, if buffer size is too small, ping may fail. */
 	int buffsize = 512 * 1024;
@@ -142,7 +165,9 @@ static int _fast_ping_create_icmp_sock(FAST_PING_TYPE type)
 			tlog(TLOG_ERROR, "create icmp socket failed, %s\n", strerror(errno));
 			goto errout;
 		}
-		icmp_host = &ping.icmp_host;
+		if (icmp_host == NULL) {
+			icmp_host = &ping.icmp_host;
+		}
 		break;
 	case FAST_PING_ICMP6:
 		if (ping.no_unprivileged_ping == 0) {
@@ -167,12 +192,20 @@ static int _fast_ping_create_icmp_sock(FAST_PING_TYPE type)
 		setsockopt(fd, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &on, sizeof(on));
 		setsockopt(fd, IPPROTO_IPV6, IPV6_2292HOPLIMIT, &on, sizeof(on));
 		setsockopt(fd, IPPROTO_IPV6, IPV6_HOPLIMIT, &on, sizeof(on));
-		icmp_host = &ping.icmp6_host;
+		if (icmp_host == NULL) {
+			icmp_host = &ping.icmp6_host;
+		}
 		break;
 	default:
 		return -1;
 	}
 
+	/* 必须在任何发包之前：路由在 sendto() 那一刻才确定 */
+	if (bind != NULL && fast_ping_bind_apply(fd, bind) != 0) {
+		tlog(TLOG_WARN, "create icmp socket: apply egress bind failed");
+		goto errout;
+	}
+	
 	struct icmp_filter filt;
 	filt.data = ~((1 << ICMP_SOURCE_QUENCH) | (1 << ICMP_DEST_UNREACH) | (1 << ICMP_TIME_EXCEEDED) |
 				  (1 << ICMP_PARAMETERPROB) | (1 << ICMP_REDIRECT) | (1 << ICMP_ECHOREPLY));
@@ -226,7 +259,7 @@ static int _fast_ping_create_icmp(FAST_PING_TYPE type)
 		goto out;
 	}
 
-	fd = _fast_ping_create_icmp_sock(type);
+	fd = _fast_ping_create_icmp_sock_ex(type, NULL, NULL);
 	if (fd < 0) {
 		goto errout;
 	}
