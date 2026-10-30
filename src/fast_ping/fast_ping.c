@@ -254,6 +254,138 @@ int fast_ping_bind_apply(int fd, const struct ping_bind *bind)
 	return 0;
 }
 
+/*
+ * ------------------------------------------------------- 出口绑定 socket 池
+ *
+ * ICMP / ICMP6 的探测 socket 是全局共享的（ping.fd_icmp / ping.fd_icmp6），
+ * 没法像 TCP 那样在 per-host socket 上 setsockopt，所以双 WAN 下 ICMP 测速
+ * 永远走默认路由 —— 测出来的延迟是错的，选路也就错了。
+ *
+ * 这里的做法：给每个不同的出口绑定组合开一个独立的 ICMP socket，
+ * 组合数等于物理出口数（双 WAN 为 2），数量可控。
+ *
+ * 收包端零改动：应答是靠 payload 里的 sid 回 addrmap 找 ping_host 的，
+ * 与从哪个 socket 收到无关；只要把池里的 socket 注册进 epoll、
+ * data.ptr 指向池内嵌的 owner，_fast_ping_process_icmp() 就自动工作。
+ */
+
+int _fast_ping_bind_is_valid(const struct ping_bind *bind)
+{
+	if (bind == NULL) {
+		return 0;
+	}
+
+	if (bind->so_mark >= 0) {
+		return 1;
+	}
+
+	if (bind->ifname[0] != '\0') {
+		return 1;
+	}
+
+	return 0;
+}
+
+static struct ping_bind_sock *_fast_ping_bind_pool(FAST_PING_TYPE type)
+{
+	if (type == FAST_PING_ICMP) {
+		return ping.icmp_bind;
+	}
+
+	if (type == FAST_PING_ICMP6) {
+		return ping.icmp6_bind;
+	}
+
+	return NULL;
+}
+
+static int _fast_ping_bind_equal(const struct ping_bind *a, const struct ping_bind *b)
+{
+	if (a->so_mark != b->so_mark) {
+		return 0;
+	}
+
+	if (strncmp(a->ifname, b->ifname, sizeof(a->ifname)) != 0) {
+		return 0;
+	}
+
+	return 1;
+}
+
+int _fast_ping_icmp_bind_fd(FAST_PING_TYPE type, const struct ping_bind *bind)
+{
+	struct ping_bind_sock *pool = NULL;
+	int i = 0;
+	int fd = -1;
+
+	pool = _fast_ping_bind_pool(type);
+	if (pool == NULL || bind == NULL) {
+		return -1;
+	}
+
+	pthread_mutex_lock(&ping.lock);
+
+	for (i = 0; i < PING_BIND_MAX; i++) {
+		if (pool[i].in_use == 0) {
+			continue;
+		}
+
+		if (_fast_ping_bind_equal(&pool[i].bind, bind) == 1) {
+			fd = pool[i].fd;
+			pthread_mutex_unlock(&ping.lock);
+			return fd;
+		}
+	}
+
+	for (i = 0; i < PING_BIND_MAX; i++) {
+		if (pool[i].in_use != 0) {
+			continue;
+		}
+
+		fd = _fast_ping_create_icmp_sock_ex(type, &pool[i].host, bind);
+		if (fd < 0) {
+			break;
+		}
+
+		pool[i].fd = fd;
+		pool[i].bind = *bind;
+		pool[i].in_use = 1;
+		pthread_mutex_unlock(&ping.lock);
+		tlog(TLOG_DEBUG, "ping: bind socket pool[%d] fd %d for mark %d dev %s", i, fd, bind->so_mark,
+			 bind->ifname[0] ? bind->ifname : "-");
+		return fd;
+	}
+
+	pthread_mutex_unlock(&ping.lock);
+	tlog(TLOG_WARN, "ping: bind socket pool full or create failed (type %d)", type);
+	return -1;
+}
+
+static void _fast_ping_close_bind_pool(void)
+{
+	int i = 0;
+	int t = 0;
+	struct ping_bind_sock *pools[2] = {ping.icmp_bind, ping.icmp6_bind};
+
+	for (t = 0; t < 2; t++) {
+		struct ping_bind_sock *pool = pools[t];
+		for (i = 0; i < PING_BIND_MAX; i++) {
+			if (pool[i].in_use == 0) {
+				continue;
+			}
+
+			if (pool[i].fd > 0) {
+				close(pool[i].fd);
+			}
+
+			pool[i].fd = -1;
+			pool[i].in_use = 0;
+			pool[i].host.fd = -1;
+			pool[i].host.type = 0;
+		}
+	}
+}
+
 struct ping_host_struct *fast_ping_start_bind(PING_TYPE type, const char *host, int count, int interval, int timeout,
 										 fast_ping_result ping_callback, void *userptr,
 										 const struct ping_bind *bind)
@@ -640,6 +772,18 @@ int fast_ping_init(void)
 	atomic_set(&ping.run, 1);
 
 	ping.epoll_fd = epollfd;
+
+	/* 池槽位显式置为「未使用」：memset 后 fd 是 0，0 是合法 fd，不能当哨兵 */
+	{
+		int i = 0;
+		for (i = 0; i < PING_BIND_MAX; i++) {
+			ping.icmp_bind[i].fd = -1;
+			ping.icmp6_bind[i].fd = -1;
+			ping.icmp_bind[i].host.fd = -1;
+			ping.icmp6_bind[i].host.fd = -1;
+		}
+	}
+
 	ret = pthread_create(&ping.tid, &attr, _fast_ping_work, NULL);
 	if (ret != 0) {
 		tlog(TLOG_ERROR, "create ping work thread failed, %s\n", strerror(ret));
@@ -697,6 +841,7 @@ static void _fast_ping_close_fds(void)
 	_fast_ping_close_icmp();
 	_fast_ping_close_udp();
 	_fast_ping_close_tcp_syn();
+	_fast_ping_close_bind_pool();
 }
 
 void fast_ping_exit(void)
