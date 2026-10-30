@@ -22,7 +22,7 @@
 #include "dualstack.h"
 #include "request.h"
 
-#include "dns_conf/server_group.h"
+#include "../dns_conf/server_group.h"
 
 #include "smartdns/fast_ping.h"
 #include <arpa/inet.h>
