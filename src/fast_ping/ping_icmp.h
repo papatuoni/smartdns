@@ -37,6 +37,10 @@ uint16_t _fast_ping_checksum(uint16_t *header, size_t len);
 
 int _fast_ping_icmp_create_socket(struct ping_host_struct *ping_host);
 
+/* owner / bind 均可为 NULL；bind 非空时创建的 socket 会绑定指定出口 */
+int _fast_ping_create_icmp_sock_ex(FAST_PING_TYPE type, struct ping_host_struct *owner,
+								   const struct ping_bind *bind);
+
 int _fast_ping_process_icmp(struct ping_host_struct *ping_host, struct timeval *now);
 
 int _fast_ping_get_addr_by_icmp(const char *ip_str, int port, struct addrinfo **out_gai, FAST_PING_TYPE *out_ping_type);
