@@ -254,7 +254,7 @@ int fast_ping_bind_apply(int fd, const struct ping_bind *bind)
 	return 0;
 }
 
-struct ping_host_struct *fast_ping_start(PING_TYPE type, const char *host, int count, int interval, int timeout,
+struct ping_host_struct *fast_ping_start_bind(PING_TYPE type, const char *host, int count, int interval, int timeout,
 										 fast_ping_result ping_callback, void *userptr,
 										 const struct ping_bind *bind)
 										 
