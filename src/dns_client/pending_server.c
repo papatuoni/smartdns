@@ -337,8 +337,21 @@ static int _dns_client_add_pendings(struct dns_server_pending *pending, char *ip
 	if (_dns_client_add_server_pending(ip, pending->host, pending->port, pending->type, &pending->flags, 0) != 0) {
 		return -1;
 	}
-
+	
+	/* 摘链模式：加锁把 group_list 整体搬到临时链表，脱锁后再逐个处理。
+	 * 不能在遍历时持锁 —— _dns_client_add_to_group_pending() 会间接调用
+	 * _dns_client_add_to_pending_group()，后者会对同一把 pending_server_mutex
+	 * 再次加锁（非递归 mutex），将造成自死锁。 */
+	LIST_HEAD(local_group_list);
+	pthread_mutex_lock(&pending_server_mutex);
 	list_for_each_entry_safe(group, tmp, &pending->group_list, list)
+	{
+		list_del_init(&group->list);
+		list_add(&group->list, &local_group_list);
+	}
+	pthread_mutex_unlock(&pending_server_mutex);
+
+	list_for_each_entry_safe(group, tmp, &local_group_list, list)
 	{
 		if (_dns_client_add_to_group_pending(group->group_name, ip, pending->port, pending->type, &pending->flags, 0) !=
 			0) {
@@ -419,7 +432,6 @@ void _dns_client_add_pending_servers(void)
 			_dns_client_server_pending_release(pending);
 			pending->retry_cnt++;
 			if (_dns_client_add_pendings(pending, pending->host) != 0) {
-				pthread_mutex_unlock(&pending_server_mutex);
 				tlog(TLOG_INFO, "add pending DNS server %s from resolv.conf failed, retry %d...", pending->host,
 					 pending->retry_cnt - 1);
 				if (pending->retry_cnt - 1 > DNS_PENDING_SERVER_RETRY) {
