@@ -47,6 +47,9 @@ extern "C" {
 #define DNS_QUERY_TIMEOUT (500)
 #define DNS_QUERY_RETRY (4)
 #define DNS_PENDING_SERVER_RETRY 60
+/* 一族已明确返回 SOA、另一族连续这么多轮毫无响应即放弃。
+ * 轮询周期 3 秒，默认 3 轮 ≈ 9 秒即可判定，不必硬刷到 60 次（≈3 分钟）。 */
+#define DNS_PENDING_NO_RESP_GIVEUP 3
 #define SOCKET_PRIORITY (6)
 #define SOCKET_IP_TOS (IPTOS_LOWDELAY | IPTOS_RELIABILITY)
 
@@ -177,7 +180,10 @@ struct dns_server_pending {
 	unsigned int query_v6;
 	unsigned int has_soa_v4;
 	unsigned int has_soa_v6;
-
+	/* 连续多少轮既没拿到 IP 也没拿到 SOA：查询丢失/超时，而非"无此主机" */
+	unsigned int no_resp_v4;
+	unsigned int no_resp_v6;
+	
 	/* server type */
 	dns_server_type_t type;
 	int retry_cnt;
