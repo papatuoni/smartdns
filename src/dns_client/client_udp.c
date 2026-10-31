@@ -141,6 +141,17 @@ int _dns_client_create_socket_udp(struct dns_server_info *server_info)
 	server_info->status = DNS_SERVER_STATUS_CONNECTING;
 	server_info->security_status = DNS_CLIENT_SERVER_SECURITY_NOT_APPLICABLE;
 
+	/* SO_MARK 必须在 connect() 之前设置。
+	 * connect() 会确定本 socket 的源地址与出口路由；若先 connect 再设 SO_MARK，
+	 * 源地址按 main 表选定，而发包时按 mark 走策略路由表，造成源地址与出口
+	 * 设备不一致，对端回包不可达，表现为查询超时。 */
+	if (server_info->so_mark >= 0) {
+		unsigned int so_mark = server_info->so_mark;
+		if (setsockopt(fd, SOL_SOCKET, SO_MARK, &so_mark, sizeof(so_mark)) != 0) {
+			tlog(TLOG_DEBUG, "set socket mark failed, %s", strerror(errno));
+		}
+	}
+
 	if (connect(fd, &server_info->addr, server_info->ai_addrlen) != 0) {
 		if (errno != EINPROGRESS) {
 			tlog(TLOG_DEBUG, "connect %s failed, %s", server_info->ip, strerror(errno));
@@ -154,13 +165,6 @@ int _dns_client_create_socket_udp(struct dns_server_info *server_info)
 	if (epoll_ctl(client.epoll_fd, EPOLL_CTL_ADD, fd, &event) != 0) {
 		tlog(TLOG_ERROR, "epoll ctl failed.");
 		return -1;
-	}
-
-	if (server_info->so_mark >= 0) {
-		unsigned int so_mark = server_info->so_mark;
-		if (setsockopt(fd, SOL_SOCKET, SO_MARK, &so_mark, sizeof(so_mark)) != 0) {
-			tlog(TLOG_DEBUG, "set socket mark failed, %s", strerror(errno));
-		}
 	}
 
 	setsockopt(server_info->fd, IPPROTO_IP, IP_RECVTTL, &on, sizeof(on));
