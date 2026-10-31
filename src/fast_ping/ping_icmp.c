@@ -32,7 +32,6 @@
 
 static void _fast_ping_install_filter_v4(int sock)
 {
-	static int once;
 	static struct sock_filter insns[] = {
 		BPF_STMT(BPF_LDX | BPF_B | BPF_MSH, 0),                    /* Skip IP header. F..g BSD... Look into ping6. */
 		BPF_STMT(BPF_LD | BPF_H | BPF_IND, 4),                     /* Load icmp echo ident */
@@ -46,12 +45,10 @@ static void _fast_ping_install_filter_v4(int sock)
 
 	static struct sock_fprog filter = {sizeof insns / sizeof(insns[0]), insns};
 
-	if (once) {
-		return;
-	}
-	once = 1;
-
 	/* Patch bpflet for current identifier. */
+	/* 注意：不能再用 static once 只装一次 —— 按出口绑定的 socket 池里每个
+	 * raw socket 都需要各自的过滤器，否则池里的 socket 会把主机收到的全部
+	 * ICMP 都收进来（噪声 + 重复处理）。 */
 	insns[2] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, htons(ping.ident), 0, 1);
 
 	if (setsockopt(sock, SOL_SOCKET, SO_ATTACH_FILTER, &filter, sizeof(filter))) {
@@ -132,6 +129,39 @@ errout:
  * bind 非空时在注册 epoll 之前完成 SO_MARK / SO_BINDTODEVICE ——
  * 路由决策发生在发包那一刻，设置晚于第一个包就等于没设置。
  */
+/*
+ * 打开 ICMP / ICMP6 socket，带运行期降级与升级。
+ *
+ * 只在 init 时探测一次 ping_group_range 是不够的：
+ *   - sysctl 可能在运行期被改（有些插件会动它）；
+ *   - 进程可能只有 CAP_NET_RAW 而没有 ping socket 授权，或反之。
+ * 所以首选模式建不出来时（EACCES / EPERM / EAFNOSUPPORT）就地换另一种，
+ * 并把实际用到的模式回写给调用方，收包解析据此判断有没有 IP 头。
+ */
+static int _fast_ping_open_icmp_sock(int af, int prefer_dgram, int *is_raw)
+{
+	int proto = (af == AF_INET) ? IPPROTO_ICMP : IPPROTO_ICMPV6;
+	int fd = -1;
+	int pass = 0;
+
+	for (pass = 0; pass < 2; pass++) {
+		int use_dgram = (pass == 0) ? prefer_dgram : !prefer_dgram;
+
+		fd = socket(af, use_dgram ? SOCK_DGRAM : SOCK_RAW, proto);
+		if (fd >= 0) {
+			*is_raw = !use_dgram;
+			return fd;
+		}
+
+		/* 只有权限类错误才值得换一种模式重试 */
+		if (errno != EACCES && errno != EPERM && errno != EAFNOSUPPORT) {
+			break;
+		}
+	}
+
+	return -1;
+}
+
 int _fast_ping_create_icmp_sock_ex(FAST_PING_TYPE type, struct ping_host_struct *owner,
 								   const struct ping_bind *bind)
 {
@@ -146,14 +176,16 @@ int _fast_ping_create_icmp_sock_ex(FAST_PING_TYPE type, struct ping_host_struct 
 	const int ip_tos = (IPTOS_LOWDELAY | IPTOS_RELIABILITY);
 
 	switch (type) {
-	case FAST_PING_ICMP:
-		if (ping.no_unprivileged_ping == 0) {
-			fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
-		} else {
-			fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
-			if (fd > 0) {
-				_fast_ping_install_filter_v4(fd);
-			}
+	case FAST_PING_ICMP: {
+		int is_raw = 0;
+
+		fd = _fast_ping_open_icmp_sock(AF_INET, ping.no_unprivileged_ping == 0, &is_raw);
+		if (fd >= 0 && is_raw) {
+			_fast_ping_install_filter_v4(fd);
+		}
+		/* 回写实际模式，收包解析依赖它判断是否带 IP 头 */
+		if (fd >= 0) {
+			ping.no_unprivileged_ping = is_raw;
 		}
 		if (fd < 0) {
 			if (errno == EACCES || errno == EAFNOSUPPORT) {
@@ -169,14 +201,16 @@ int _fast_ping_create_icmp_sock_ex(FAST_PING_TYPE type, struct ping_host_struct 
 			icmp_host = &ping.icmp_host;
 		}
 		break;
-	case FAST_PING_ICMP6:
-		if (ping.no_unprivileged_ping == 0) {
-			fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6);
-		} else {
-			fd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
-			if (fd > 0) {
-				_fast_ping_install_filter_v6(fd);
-			}
+	}
+	case FAST_PING_ICMP6: {
+		int is_raw6 = 0;
+
+		fd = _fast_ping_open_icmp_sock(AF_INET6, ping.no_unprivileged_ping6 == 0, &is_raw6);
+		if (fd >= 0 && is_raw6) {
+			_fast_ping_install_filter_v6(fd);
+		}
+		if (fd >= 0) {
+			ping.no_unprivileged_ping6 = is_raw6;
 		}
 
 		if (fd < 0) {
@@ -196,6 +230,7 @@ int _fast_ping_create_icmp_sock_ex(FAST_PING_TYPE type, struct ping_host_struct 
 			icmp_host = &ping.icmp6_host;
 		}
 		break;
+	}
 	default:
 		return -1;
 	}
