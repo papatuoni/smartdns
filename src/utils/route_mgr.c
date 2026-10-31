@@ -511,7 +511,6 @@ static void route_mgr_policy_apply(void)
 			continue;
 		}
 
-		route_nl_rule_set(&g_mgr.egress[i], 0);
 		if (route_nl_rule_exists((unsigned int)g_mgr.egress[i].so_mark, g_mgr.egress[i].table,
 								 (unsigned int)g_mgr.egress[i].so_mark) == 0) {
 			route_nl_rule_set(&g_mgr.egress[i], 0);
