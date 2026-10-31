@@ -767,7 +767,8 @@ int fast_ping_init(void)
 
 	hash_init(ping.addrmap);
 	hash_init(ping.fake);
-	ping.no_unprivileged_ping = !has_unprivileged_ping();
+	ping.no_unprivileged_ping = !has_unprivileged_ping4();
+	ping.no_unprivileged_ping6 = !has_unprivileged_ping6();
 	ping.ident = (getpid() & 0XFFFF);
 	atomic_set(&ping.run, 1);
 
