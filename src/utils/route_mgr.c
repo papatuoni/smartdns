@@ -1163,8 +1163,35 @@ int route_mgr_init(int epoll_fd)
 
 void route_mgr_exit(void)
 {
-	ct_free();
+	int i;
+	struct route_entry *e = NULL;
+	struct route_entry *next = NULL;
 	
+	ct_free();
+	/* 清理内核残留：本进程下发的主机路由（/32）与 fwmark 规则。
+	 * 否则停用 / 重启后会留下孤儿路由与 ip rule：
+	 *   - 路由仍把流量指向可能已经消失的出口；
+	 *   - ip rule 只增不减（RTM_NEWRULE 不支持 REPLACE，内核也不查重），
+	 *     下次启动再下发一份，规则数逐次累积。
+	 * 必须在关闭 fd_cmd 之前做，删除还要走同一个 netlink socket。 */
+	if (g_mgr.enabled) {
+		for (i = 0; i < ROUTE_MGR_HASH_SIZE; i++) {
+			e = g_mgr.hash[i];
+			g_mgr.hash[i] = NULL;
+			while (e) {
+				next = e->next;
+				route_nl_set(e, 1);
+				free(e);
+				e = next;
+			}
+		}
+		g_mgr.route_num = 0;
+
+		for (i = 0; i < g_mgr.egress_num; i++) {
+			route_nl_rule_set(&g_mgr.egress[i], 1);
+		}
+	}
+
 	if (g_mgr.fd_cmd >= 0) {
 		close(g_mgr.fd_cmd);
 		g_mgr.fd_cmd = -1;
