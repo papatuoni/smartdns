@@ -180,6 +180,7 @@ struct fast_ping_struct {
 
 	int epoll_fd;
 	int no_unprivileged_ping;
+	int no_unprivileged_ping6;
 	int fd_icmp;
 	struct ping_host_struct icmp_host;
 	int fd_icmp6;
