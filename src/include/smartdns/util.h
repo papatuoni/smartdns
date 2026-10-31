@@ -176,6 +176,8 @@ int is_numeric(const char *str);
 int has_network_raw_cap(void);
 
 int has_unprivileged_ping(void);
+int has_unprivileged_ping4(void);
+int has_unprivileged_ping6(void);
 
 int set_sock_keepalive(int fd, int keepidle, int keepinterval, int keepcnt);
 
