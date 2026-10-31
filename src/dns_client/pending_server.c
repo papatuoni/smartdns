@@ -488,9 +488,37 @@ void _dns_client_add_pending_servers(void)
 		if (pending->retry_cnt == 1) {
 			continue;
 		}
+		
+		/* 统计无响应轮次：既无 IP 也无 SOA，说明查询根本没回来（超时/被丢弃），
+		 * 与"明确回复 SOA（无此主机）"是两回事，需分开计。 */
+		if (pending->has_v4 == 0 && pending->has_soa_v4 == 0) {
+			pending->no_resp_v4++;
+		} else {
+			pending->no_resp_v4 = 0;
+		}
+		if (pending->has_v6 == 0 && pending->has_soa_v6 == 0) {
+			pending->no_resp_v6++;
+		} else {
+			pending->no_resp_v6 = 0;
+		}
 
 		if (dnsserver_ip == NULL && pending->has_soa_v4 && pending->has_soa_v6) {
 			tlog(TLOG_WARN, "add pending DNS server %s failed, no such host.", pending->host);
+			_dns_client_server_pending_remove(pending);
+			continue;
+		}
+
+		/* 一族明确返回 SOA（域名不存在，或被 force-aaaa-soa 这类客户端策略改写），
+		 * 另一族连续多轮毫无响应 —— 已经不是"慢"，而是根本拿不到地址。
+		 *
+		 * 原逻辑要求两族都 SOA 才放弃，于是「AAAA 被 force-aaaa-soa 强制成 SOA、
+		 * A 却超时无回调」时 has_soa_v4 恒为 0，条件永远不成立，只能硬刷到
+		 * DNS_PENDING_SERVER_RETRY(60) 次 ≈ 3 分钟，期间每 3 秒重发一轮查询并刷日志。 */
+		if (dnsserver_ip == NULL && (pending->has_soa_v4 || pending->has_soa_v6) &&
+			(pending->no_resp_v4 > DNS_PENDING_NO_RESP_GIVEUP ||
+			 pending->no_resp_v6 > DNS_PENDING_NO_RESP_GIVEUP)) {
+			tlog(TLOG_WARN, "add pending DNS server %s failed, %s no response, give up.", pending->host,
+				 pending->has_soa_v4 ? "AAAA" : "A");
 			_dns_client_server_pending_remove(pending);
 			continue;
 		}
