@@ -470,16 +470,9 @@ int set_sock_lingertime(int fd, int time)
 	return 0;
 }
 
-int has_unprivileged_ping(void)
+static int _has_unprivileged_ping_af(int af, int proto)
 {
-	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
-	if (fd < 0) {
-		return 0;
-	}
-
-	close(fd);
-
-	fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6);
+	int fd = socket(af, SOCK_DGRAM, proto);
 	if (fd < 0) {
 		return 0;
 	}
@@ -487,4 +480,27 @@ int has_unprivileged_ping(void)
 	close(fd);
 
 	return 1;
+}
+
+int has_unprivileged_ping4(void)
+{
+	return _has_unprivileged_ping_af(AF_INET, IPPROTO_ICMP);
+}
+
+int has_unprivileged_ping6(void)
+{
+	return _has_unprivileged_ping_af(AF_INET6, IPPROTO_ICMPV6);
+}
+
+/*
+ * 按协议族独立判定，不要用一个族的结果去决定另一个族：
+ * IPv6 不可用（或未开放 ping_group_range）时，不应把 IPv4 也拖进 raw 模式。
+ */
+int has_unprivileged_ping(void)
+{
+	if (has_unprivileged_ping4() == 0) {
+		return 0;
+	}
+
+	return has_unprivileged_ping6();
 }
