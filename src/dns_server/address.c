@@ -284,6 +284,41 @@ void _dns_server_select_possible_ipaddress(struct dns_request *request)
 	}
 }
 
+static struct dns_ip_address *_dns_ip_address_get_nolock(struct dns_request *request, unsigned char *addr,
+														 dns_type_t addr_type)
+{
+	uint32_t key = 0;
+	struct dns_ip_address *addr_map = NULL;
+	struct dns_ip_address *addr_tmp = NULL;
+	int addr_len = 0;
+
+	if (addr_type == DNS_T_A) {
+		addr_len = DNS_RR_A_LEN;
+	} else if (addr_type == DNS_T_AAAA) {
+		addr_len = DNS_RR_AAAA_LEN;
+	} else {
+		return NULL;
+	}
+
+	key = jhash(addr, addr_len, 0);
+	key = jhash(&addr_type, sizeof(addr_type), key);
+	hash_for_each_possible(request->ip_map, addr_tmp, node, key)
+	{
+		if (addr_type != addr_tmp->addr_type) {
+			continue;
+		}
+
+		if (memcmp(addr_tmp->ip_addr, addr, addr_len) != 0) {
+			continue;
+		}
+
+		addr_map = addr_tmp;
+		break;
+	}
+
+	return addr_map;
+}
+
 void _dns_ip_address_set_src_bind(struct dns_request *request, unsigned char *addr, dns_type_t addr_type,
 								  const struct ping_bind *bind)
 {
@@ -298,7 +333,7 @@ void _dns_ip_address_set_src_bind(struct dns_request *request, unsigned char *ad
 	}
 
 	pthread_mutex_lock(&request->ip_map_lock);
-	addr_map = _dns_ip_address_get(request, addr, addr_type);
+	addr_map = _dns_ip_address_get_nolock(request, addr, addr_type);
 	if (addr_map != NULL) {
 		addr_map->src_bind = *bind;
 		addr_map->src_bind_valid = 1;
@@ -322,22 +357,8 @@ struct dns_ip_address *_dns_ip_address_get(struct dns_request *request, unsigned
 	}
 
 	/* store the ip address and the number of hits */
-	key = jhash(addr, addr_len, 0);
-	key = jhash(&addr_type, sizeof(addr_type), key);
 	pthread_mutex_lock(&request->ip_map_lock);
-	hash_for_each_possible(request->ip_map, addr_tmp, node, key)
-	{
-		if (addr_type != addr_tmp->addr_type) {
-			continue;
-		}
-
-		if (memcmp(addr_tmp->ip_addr, addr, addr_len) != 0) {
-			continue;
-		}
-
-		addr_map = addr_tmp;
-		break;
-	}
+	addr_map = _dns_ip_address_get_nolock(request, addr, addr_type);
 	pthread_mutex_unlock(&request->ip_map_lock);
 
 	return addr_map;
