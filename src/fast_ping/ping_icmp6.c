@@ -46,10 +46,7 @@ void _fast_ping_install_filter_v6(int sock)
 	};
 	static struct sock_fprog filter = {sizeof insns / sizeof(insns[0]), insns};
 
-	if (once) {
-		return;
-	}
-	once = 1;
+	/* 同 v4：每个 raw socket 都要装，不能用 static once 只装第一个。 */
 
 	/* Patch bpflet for current identifier. */
 	insns[1] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, htons(ping.ident), 0, 1);
@@ -179,7 +176,7 @@ struct fast_ping_packet *_fast_ping_icmp6_packet(struct ping_host_struct *ping_h
 		return NULL;
 	}
 
-	if (ping.no_unprivileged_ping) {
+	if (ping.no_unprivileged_ping6) {
 		if (icmp6->icmp6_id != ping.ident) {
 			tlog(TLOG_ERROR, "ident failed, %d:%d", icmp6->icmp6_id, ping.ident);
 			return NULL;
