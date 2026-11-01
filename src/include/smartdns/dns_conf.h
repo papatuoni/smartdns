@@ -89,7 +89,8 @@ enum domain_rule {
 	DOMAIN_RULE_NFTSET_IP,  /* NFTSet IPv4 */
 	DOMAIN_RULE_IPSET_IPV4, /* IPv4 IPSet */
 
-	DOMAIN_RULE_GROUP, /* Group rule */
+	DOMAIN_RULE_GROUP,       /* Group rule */
+	DOMAIN_RULE_CACHE_GROUP, /* Cache group rule: read cache from another group */
 
 	DOMAIN_RULE_NFTSET_IP6, /* NFTSet IPv6 */
 	DOMAIN_RULE_IPSET_IPV6, /* IPv6 IPSet */
@@ -287,6 +288,20 @@ struct dns_nameserver_rule {
 };
 
 struct dns_group_rule {
+	struct dns_rule head;
+	const char *group_name;
+};
+
+/* Cache group rule: read cache from the specified group instead of the
+ * group the request itself belongs to.
+ *
+ * group_name points to a string owned by the server-group table and stays
+ * valid for the lifetime of the process, so no clone/append/destroy
+ * callbacks are registered in dns_rule_info_table.
+ * group_name == NULL means "explicitly disable cross-group cache read"
+ * (used by `-cache-group -` to override a wildcard rule).
+ */
+struct dns_cache_group_rule {
 	struct dns_rule head;
 	const char *group_name;
 };
