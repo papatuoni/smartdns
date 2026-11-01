@@ -1019,10 +1019,18 @@ int _conf_domain_rule_cache_group(const char *domain, const char *group_name)
 	struct dns_cache_group_rule *cache_group_rule = NULL;
 	const char *group = NULL;
 
-	group = _dns_conf_get_group_name(group_name);
-	if (group == NULL) {
+	if (domain == NULL || group_name == NULL) {
 		goto errout;
 	}
+
+	if (strncmp(group_name, "-", sizeof("-")) != 0) {
+		group = _dns_conf_get_group_name(group_name);
+		if (group == NULL) {
+			goto errout;
+		}
+	}
+	/* group_name "-" keeps group == NULL, which explicitly disables
+	 * cross-group cache read (used to override a wildcard cache-group rule). */
 
 	cache_group_rule = _new_dns_rule(DOMAIN_RULE_CACHE_GROUP);
 	if (cache_group_rule == NULL) {
@@ -1042,8 +1050,8 @@ errout:
 		_dns_rule_put(&cache_group_rule->head);
 	}
 
-	tlog(TLOG_ERROR, "add cache-group %s, %s failed", domain, group_name);
-	return 0;
+	tlog(TLOG_ERROR, "add cache-group %s, %s failed", domain, group_name ? group_name : "(null)");
+	return -1;
 }
 
 static int _conf_domain_rule_dualstack_selection(char *domain, const char *yesno)
