@@ -504,6 +504,7 @@ struct dns_request *_dns_server_new_request(void)
 	atomic_set(&request->plugin_complete_called, 0);
 	request->ping_time = -1;
 	request->prefetch = 0;
+	request->cache_group_name = NULL;
 	request->dualstack_selection = 0;
 	request->dualstack_selection_ping_time = -1;
 	request->rcode = DNS_RC_SERVFAIL;
