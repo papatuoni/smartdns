@@ -24,7 +24,6 @@
 #include "request.h"
 #include "rules.h"
 #include "soa.h"
-#include "smartdns/dns_stats.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -327,6 +326,41 @@ out:
 	return -1;
 }
 
+/* Look up a cache entry for (group, domain, qtype).
+ *
+ * Normal lookup uses the request's own server_flags as query_flag.
+ * For a cross-group read (request->cache_group_name != NULL) the target group is
+ * normally populated by a bind port that carries no `-no-*` flags (e.g. 6653),
+ * so its entries always have query_flag == 0. When the current request does carry
+ * bind flags the first lookup misses; retry once with query_flag 0 instead of
+ * hard-coding it, so the read keeps working even if the target port later gains
+ * bind flags (which would otherwise fail silently).
+ */
+static struct dns_cache *_dns_server_cache_lookup_ex(struct dns_request *request, const char *group_name,
+													 const char *domain, dns_type_t qtype)
+	
+{
+	struct dns_cache_key cache_key;
+	struct dns_cache *dns_cache = NULL;
+
+	cache_key.dns_group_name = group_name;
+	cache_key.domain = domain;
+	cache_key.qtype = qtype;
+	cache_key.query_flag = request->server_flags;
+
+	dns_cache = dns_cache_lookup(&cache_key);
+	if (dns_cache != NULL) {
+		return dns_cache;
+	}
+
+	if (request->cache_group_name != NULL && request->server_flags != 0) {
+		cache_key.query_flag = 0;
+		dns_cache = dns_cache_lookup(&cache_key);
+	}
+
+	return dns_cache;
+}
+
 int _dns_server_process_cache(struct dns_request *request)
 {
 	struct dns_cache *dns_cache = NULL;
@@ -334,31 +368,15 @@ int _dns_server_process_cache(struct dns_request *request)
 	int ret = -1;
 	const char *cache_group_name = request->dns_group_name;
 
-	/* 指定了 cache-group：改从该组读缓存，且不受 bind 的 -no-cache 限制 */
-
+	/* cache-group: read the cache of another group, and bypass the
+	 * bind-level `-no-cache` restriction for this domain. */
 	if (request->cache_group_name != NULL) {
 		cache_group_name = request->cache_group_name;
 	} else if (_dns_server_has_bind_flag(request, BIND_FLAG_NO_CACHE) == 0) {
 		goto out;
 	}
 
-	struct dns_cache_key cache_key;
-	cache_key.dns_group_name = cache_group_name;
-	cache_key.domain = request->domain;
-	cache_key.qtype = request->qtype;
-	cache_key.query_flag = request->server_flags;
-
-	/* 跨组读取：目标组由不带 bind 参数的 6653 写入，其条目 query_flag 恒为 0。
-	   若将来为 6653 添加 bind 参数，此处需同步修改，否则跨组读取静默失效。 */
-	if (request->cache_group_name != NULL) {
-		cache_key.query_flag = 0;
-	}
-
-	dns_cache = dns_cache_lookup(&cache_key);
-	/* 跨组读取：忽略 query_flag 差异。
-	   6653 端口不带任何 -no-* 参数，其写入的缓存 query_flag 恒为 0；
-	   若将来为 6653 添加 bind 参数，此处必须同步修改，否则跨组读取静默失效。 */
-	
+	dns_cache = _dns_server_cache_lookup_ex(request, cache_group_name, request->domain, request->qtype);
 	if (dns_cache == NULL) {
 		goto out;
 	}
@@ -389,11 +407,10 @@ int _dns_server_process_cache(struct dns_request *request)
 			goto reply_cache;
 		}
 
-		cache_key.qtype = dualstack_qtype;
-		dualstack_dns_cache = dns_cache_lookup(&cache_key);
+		dualstack_dns_cache = _dns_server_cache_lookup_ex(request, cache_group_name, request->domain, dualstack_qtype);
 		if (dualstack_dns_cache == NULL && request->cname[0] != '\0') {
-			cache_key.domain = request->cname;
-			dualstack_dns_cache = dns_cache_lookup(&cache_key);
+			dualstack_dns_cache =
+				_dns_server_cache_lookup_ex(request, cache_group_name, request->cname, dualstack_qtype);
 		}
 
 		if (dualstack_dns_cache && (dualstack_dns_cache->info.speed > 0)) {
@@ -430,7 +447,8 @@ out_update_cache:
 			dns_query_options.server_flags = dns_cache_get_query_flag(dns_cache);
 			dns_query_options.dns_group_name = dns_cache_get_dns_group_name(dns_cache);
 		}
-		/* 新增：跨组读取时，续期走目标组的上游，避免回落到分流器 */
+		/* 跨组读取：续期(prefetch)走目标组，并使用该缓存条目的写入 flags，
+		   与写入端口保持一致，避免回落到分流器。 */
 		if (request->cache_group_name != NULL) {
 			dns_query_options.dns_group_name = request->cache_group_name;
 			dns_query_options.server_flags = dns_cache_get_query_flag(dns_cache);
