@@ -289,7 +289,10 @@ struct dns_request {
 	struct dns_conf_group *conf;
 	uint32_t server_flags;
 	char dns_group_name[DNS_GROUP_NAME_LEN];
-	/* 跨组读缓存：指向配置中长期有效的组名字符串，NULL 表示未配置。用指针而非数组，可省去每请求 32 字节，并直接用 NULL 判空。 */   
+	/* Cross-group cache read: points to a group name string owned by the
+	 * server-group table (valid for the process lifetime), so no copy is needed
+	 * and NULL directly means "not configured".
+	 * NULL also means "explicitly disabled" when `-cache-group -` is used. */  
 	const char *cache_group_name;
 	
 	/* dns request list */
