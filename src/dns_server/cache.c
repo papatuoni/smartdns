@@ -24,6 +24,7 @@
 #include "request.h"
 #include "rules.h"
 #include "soa.h"
+#include "smartdns/dns_stats.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -140,7 +141,7 @@ int _dns_server_request_update_cache(struct dns_request *request, int speed, dns
 		ttl = _dns_server_get_conf_ttl(request, request->ip_ttl);
 	}
 
-	tlog(TLOG_DEBUG, "cache %s qtype: %d ttl: %d\n", request->domain, qtype, ttl);
+	tlog(TLOG_DEBUG, "cache %s qtype: %d ttl: %d group=%s flags=%u\n", request->domain, qtype, ttl, request->dns_group_name, request->server_flags);
 
 	/* if doing prefetch, update cache only */
 	struct dns_cache_key cache_key;
@@ -331,18 +332,33 @@ int _dns_server_process_cache(struct dns_request *request)
 	struct dns_cache *dns_cache = NULL;
 	struct dns_cache *dualstack_dns_cache = NULL;
 	int ret = -1;
+	const char *cache_group_name = request->dns_group_name;
 
-	if (_dns_server_has_bind_flag(request, BIND_FLAG_NO_CACHE) == 0) {
+	/* 指定了 cache-group：改从该组读缓存，且不受 bind 的 -no-cache 限制 */
+
+	if (request->cache_group_name != NULL) {
+		cache_group_name = request->cache_group_name;
+	} else if (_dns_server_has_bind_flag(request, BIND_FLAG_NO_CACHE) == 0) {
 		goto out;
 	}
 
 	struct dns_cache_key cache_key;
-	cache_key.dns_group_name = request->dns_group_name;
+	cache_key.dns_group_name = cache_group_name;
 	cache_key.domain = request->domain;
 	cache_key.qtype = request->qtype;
 	cache_key.query_flag = request->server_flags;
 
+	/* 跨组读取：目标组由不带 bind 参数的 6653 写入，其条目 query_flag 恒为 0。
+	   若将来为 6653 添加 bind 参数，此处需同步修改，否则跨组读取静默失效。 */
+	if (request->cache_group_name != NULL) {
+		cache_key.query_flag = 0;
+	}
+
 	dns_cache = dns_cache_lookup(&cache_key);
+	/* 跨组读取：忽略 query_flag 差异。
+	   6653 端口不带任何 -no-* 参数，其写入的缓存 query_flag 恒为 0；
+	   若将来为 6653 添加 bind 参数，此处必须同步修改，否则跨组读取静默失效。 */
+	
 	if (dns_cache == NULL) {
 		goto out;
 	}
@@ -409,10 +425,15 @@ out_update_cache:
 		struct dns_server_query_option dns_query_options;
 		int prefetch_flags = 0;
 		dns_query_options.server_flags = request->server_flags;
-		dns_query_options.dns_group_name = request->dns_group_name;
+		dns_query_options.dns_group_name = cache_group_name;
 		if (request->conn == NULL) {
 			dns_query_options.server_flags = dns_cache_get_query_flag(dns_cache);
 			dns_query_options.dns_group_name = dns_cache_get_dns_group_name(dns_cache);
+		}
+		/* 新增：跨组读取时，续期走目标组的上游，避免回落到分流器 */
+		if (request->cache_group_name != NULL) {
+			dns_query_options.dns_group_name = request->cache_group_name;
+			dns_query_options.server_flags = dns_cache_get_query_flag(dns_cache);
 		}
 
 		dns_query_options.ecs_enable_flag = 0;
