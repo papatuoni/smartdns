@@ -37,6 +37,7 @@
 #include "ptr.h"
 #include "request.h"
 #include "request_pending.h"
+#include "route_cache.h"
 #include "rules.h"
 #include "server_https.h"
 #include "server_socket.h"
@@ -146,6 +147,10 @@ static int dns_server_resolve_callback(const char *domain, dns_result_type rtype
 	if (request == NULL) {
 		return -1;
 	}
+
+	/* Remember which egress produced this reply so per-IP addresses carry it. */
+	safe_strncpy(request->src_ifname, dns_client_server_info_get_ifname(server_info),
+				 sizeof(request->src_ifname));
 
 	if (rtype == DNS_QUERY_RESULT) {
 		tlog(TLOG_DEBUG, "query result from server %s:%d, type: %d, domain: %s qtype: %d rcode: %d, id: %d",
@@ -991,6 +996,8 @@ void dns_server_exit(void)
 	_dns_server_request_remove_all();
 	pthread_mutex_destroy(&server.request_list_lock);
 	dns_cache_destroy();
+	/* 最后兜底：清掉所有由缓存事件下发的 /32，不留残留 */
+	route_cache_exit();
 
 	is_server_init = 0;
 }
