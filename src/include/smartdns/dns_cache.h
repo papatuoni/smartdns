@@ -132,6 +132,13 @@ typedef enum DNS_CACHE_TMOUT_ACTION {
 
 typedef dns_cache_tmout_action_t (*dns_cache_callback)(struct dns_cache *dns_cache);
 
+/* Observer notified whenever a cache entry is really removed. Covers expiry DEL,
+ * LRU eviction, flush, destroy and the old-entry drop performed by replace/insert.
+ * Must not block and must not call back into dns_cache_* (called under the cache lock). */
+typedef void (*dns_cache_remove_hook)(const char *group, const char *domain, int qtype, uint32_t query_flag);
+
+void dns_cache_set_remove_hook(dns_cache_remove_hook hook);
+
 typedef void (*dns_cache_foreach_cb)(const char *domain, uint16_t qtype, int ttl_remaining, time_t insert_time, void *userdata);
 
 int dns_cache_foreach(dns_cache_foreach_cb cb, void *userdata);
