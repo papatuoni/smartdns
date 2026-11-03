@@ -19,6 +19,7 @@
 #ifndef FAST_PING_H
 #define FAST_PING_H
 
+#include <net/if.h>
 #include <netdb.h>
 #include <sys/time.h>
 #ifdef __cplusplus
@@ -31,6 +32,17 @@ typedef enum {
 	PING_TYPE_TCP_SYN = 3,
 	PING_TYPE_DNS = 4,
 } PING_TYPE;
+
+/*
+ * 探测包的出口绑定描述。
+ *
+ * ifname[0] == '\0'  : 不设置 SO_BINDTODEVICE，走默认路由。
+ * SO_MARK 刻意不用：它依赖 ip rule 多表，硬件卸载下不友好；
+ * 指定出口只靠 SO_BINDTODEVICE，与 DNS 查询 socket 保持一致。
+ */
+struct ping_bind {
+	char ifname[IFNAMSIZ];
+};
 
 typedef enum {
 	PING_RESULT_RESPONSE = 1,
@@ -47,6 +59,14 @@ typedef void (*fast_ping_result)(struct ping_host_struct *ping_host, const char 
 /* start ping */
 struct ping_host_struct *fast_ping_start(PING_TYPE type, const char *host, int count, int interval, int timeout,
 										 fast_ping_result ping_callback, void *userptr);
+
+/*
+ * 带出口绑定的 ping。bind 为 NULL 时等价于 fast_ping_start()。
+ * ICMP / ICMP6 通过按出口的 socket 池实现绑定，TCP 系在 per-host socket 上绑定。
+ */
+struct ping_host_struct *fast_ping_start_bind(PING_TYPE type, const char *host, int count, int interval, int timeout,
+											  fast_ping_result ping_callback, void *userptr,
+											  const struct ping_bind *bind);
 
 int fast_ping_fake_ip_add(PING_TYPE type, const char *host, int ttl, float time);
 
