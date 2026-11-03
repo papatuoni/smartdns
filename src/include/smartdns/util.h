@@ -177,6 +177,11 @@ int has_network_raw_cap(void);
 
 int has_unprivileged_ping(void);
 
+/* Per-family probes: ICMP (DGRAM) and ICMPv6 (DGRAM) capabilities are
+ * independent (ping_group_range only covers IPv4 on some kernels). */
+int has_unprivileged_ping4(void);
+int has_unprivileged_ping6(void);
+
 int set_sock_keepalive(int fd, int keepidle, int keepinterval, int keepcnt);
 
 int set_sock_lingertime(int fd, int time);
