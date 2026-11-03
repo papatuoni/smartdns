@@ -175,6 +175,9 @@ int _dns_ip_address_check_add(struct dns_request *request, char *cname, unsigned
 
 		addr_map->hitnum++;
 		addr_map->recv_tick = get_tick_count();
+		if (addr_map->src_ifname[0] == '\0' && request->src_ifname[0] != '\0') {
+			safe_strncpy(addr_map->src_ifname, request->src_ifname, sizeof(addr_map->src_ifname));
+		}
 		pthread_mutex_unlock(&request->ip_map_lock);
 		return -1;
 	}
@@ -192,6 +195,7 @@ int _dns_ip_address_check_add(struct dns_request *request, char *cname, unsigned
 	addr_map->recv_tick = get_tick_count();
 	addr_map->ping_time = ping_time;
 	memcpy(addr_map->ip_addr, addr, addr_len);
+	safe_strncpy(addr_map->src_ifname, request->src_ifname, sizeof(addr_map->src_ifname));
 	if (request->conf->dns_force_no_cname == 0) {
 		safe_strncpy(addr_map->cname, cname, DNS_MAX_CNAME_LEN);
 	}
