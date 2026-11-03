@@ -22,7 +22,10 @@
 #include "dualstack.h"
 #include "request.h"
 
+#include "../dns_conf/server_group.h"
+
 #include "smartdns/fast_ping.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <string.h>
 
@@ -183,9 +186,78 @@ out:
 	}
 }
 
+/* Egress for a probe: prefer the address's own source interface (so an IP
+ * learned over WAN-A is measured over WAN-A), then the request-level fallback.
+ * No group traversal, no SO_MARK, no request->ping_bind state. */
+
+/*
+ * 把 "1.2.3.4" / "1.2.3.4:80" / "[fd00::1]" / "[fd00::1]:80" 还原成 ip_map 里的候选条目。
+ *
+ * 测速入口拿到的是字符串（ICMP 是裸 IP，TCP 带 :port，IPv6 还带方括号），
+ * 而 ip_map 的键是原始字节，所以要先剥掉端口和方括号再查表。
+ * 查不到就返回 NULL，调用方回退到 request 级出口，行为与改造前完全一致。
+ */
+static struct dns_ip_address *_dns_server_addr_map_by_ip_str(struct dns_request *request, const char *ip)
+{
+	char buf[DNS_MAX_CNAME_LEN] = {0};
+	const char *start = ip;
+	const char *end = NULL;
+	size_t len = 0;
+	struct in_addr in4;
+	struct in6_addr in6;
+
+	if (request == NULL || ip == NULL || ip[0] == '\0') {
+		return NULL;
+	}
+
+	if (ip[0] == '[') {
+		/* IPv6：[地址] 或 [地址]:端口 */
+		start = ip + 1;
+		end = strchr(start, ']');
+		if (end == NULL) {
+			return NULL;
+		}
+		len = (size_t)(end - start);
+		if (len == 0 || len >= sizeof(buf)) {
+			return NULL;
+		}
+		memcpy(buf, start, len);
+		buf[len] = '\0';
+		if (inet_pton(AF_INET6, buf, &in6) != 1) {
+			return NULL;
+		}
+		return _dns_ip_address_get(request, (unsigned char *)&in6, DNS_T_AAAA);
+	}
+
+	/* IPv4：地址 或 地址:端口 */
+	end = strchr(start, ':');
+	len = (end != NULL) ? (size_t)(end - start) : strlen(start);
+	if (len == 0 || len >= sizeof(buf)) {
+		return NULL;
+	}
+	memcpy(buf, start, len);
+	buf[len] = '\0';
+	if (inet_pton(AF_INET, buf, &in4) != 1) {
+		return NULL;
+	}
+	return _dns_ip_address_get(request, (unsigned char *)&in4, DNS_T_A);
+}
+
 static int _dns_server_ping(struct dns_request *request, PING_TYPE type, char *ip, int timeout)
 {
-	if (fast_ping_start(type, ip, 1, 0, timeout, _dns_server_ping_result, request) == NULL) {
+	struct dns_ip_address *addr_map = NULL;
+	struct ping_bind bind;
+
+	memset(&bind, 0, sizeof(bind));
+	addr_map = _dns_server_addr_map_by_ip_str(request, ip);
+	if (addr_map != NULL && addr_map->src_ifname[0] != '\0') {
+		safe_strncpy(bind.ifname, addr_map->src_ifname, sizeof(bind.ifname));
+	} else if (request->src_ifname[0] != '\0') {
+		safe_strncpy(bind.ifname, request->src_ifname, sizeof(bind.ifname));
+	}
+
+	if (fast_ping_start_bind(type, ip, 1, 0, timeout, _dns_server_ping_result, request,
+							 bind.ifname[0] != '\0' ? &bind : NULL) == NULL) {
 		return -1;
 	}
 
