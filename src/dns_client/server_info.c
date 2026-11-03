@@ -420,6 +420,7 @@ int _dns_client_server_add(const char *server_ip, const char *server_host, int p
 	server_info->skip_check_cert = skip_check_cert;
 	server_info->prohibit = 0;
 	server_info->so_mark = flags->set_mark;
+	safe_strncpy(server_info->ifname, flags->ifname, sizeof(server_info->ifname));
 	server_info->drop_packet_latency_ms = flags->drop_packet_latency_ms;
 	server_info->security_status = DNS_CLIENT_SERVER_SECURITY_UNKNOW;
 
@@ -696,4 +697,23 @@ int dns_server_num(void)
 int dns_server_alive_num(void)
 {
 	return atomic_read(&client.dns_server_num) - atomic_read(&client.dns_server_prohibit_num);
+}
+
+
+/* Egress of the upstream that produced a reply. Used by the cache-driven
+ * direct-route observer and by per-egress speed checking. */
+const char *dns_client_server_info_get_ifname(struct dns_server_info *server_info)
+{
+	if (server_info == NULL) {
+		return "";
+	}
+	return server_info->ifname;
+}
+
+long long dns_client_server_info_get_so_mark(struct dns_server_info *server_info)
+{
+	if (server_info == NULL) {
+		return -1;
+	}
+	return server_info->so_mark;
 }
