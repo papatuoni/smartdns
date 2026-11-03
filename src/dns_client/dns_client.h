@@ -84,6 +84,8 @@ struct dns_server_info {
 	/* server type */
 	dns_server_type_t type;
 	long long so_mark;
+	/* Egress interface of this upstream (-interface); empty = default route. */
+	char ifname[DNS_SERVER_IFNAME_LEN];
 	int drop_packet_latency_ms;
 
 	/* client socket */
