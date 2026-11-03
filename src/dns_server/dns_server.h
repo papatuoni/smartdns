@@ -230,6 +230,8 @@ struct dns_ip_address {
 	dns_type_t addr_type;
 	char cname[DNS_MAX_CNAME_LEN];
 	unsigned char ip_addr[DNS_RR_AAAA_LEN];
+	/* -interface of the upstream this address came from; empty = default egress. */
+	char src_ifname[DNS_SERVER_IFNAME_LEN];
 };
 
 struct dns_request_pending_list {
@@ -289,6 +291,8 @@ struct dns_request {
 	struct dns_conf_group *conf;
 	uint32_t server_flags;
 	char dns_group_name[DNS_GROUP_NAME_LEN];
+	/* -interface of the upstream currently delivering this reply. */
+	char src_ifname[DNS_SERVER_IFNAME_LEN];
 	/* Cross-group cache read: points to a group name string owned by the
 	 * server-group table (valid for the process lifetime), so no copy is needed
 	 * and NULL directly means "not configured".
