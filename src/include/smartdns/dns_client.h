@@ -93,6 +93,10 @@ unsigned int dns_client_server_result_flag(struct dns_server_info *server_info);
 
 const char *dns_client_get_server_ip(struct dns_server_info *server_info);
 
+const char *dns_client_server_info_get_ifname(struct dns_server_info *server_info);
+
+long long dns_client_server_info_get_so_mark(struct dns_server_info *server_info);
+
 dns_server_security_status dns_client_get_server_security_status(struct dns_server_info *server_info);
 
 const char *dns_client_get_server_host(struct dns_server_info *server_info);
