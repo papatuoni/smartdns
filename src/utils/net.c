@@ -470,7 +470,7 @@ int set_sock_lingertime(int fd, int time)
 	return 0;
 }
 
-int has_unprivileged_ping(void)
+int has_unprivileged_ping4(void)
 {
 	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP);
 	if (fd < 0) {
@@ -478,8 +478,11 @@ int has_unprivileged_ping(void)
 	}
 
 	close(fd);
-
-	fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6);
+	return 1;
+}
+	int has_unprivileged_ping6(void)
+{
+	int fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6);
 	if (fd < 0) {
 		return 0;
 	}
@@ -487,4 +490,9 @@ int has_unprivileged_ping(void)
 	close(fd);
 
 	return 1;
+}
+
+int has_unprivileged_ping(void)
+{
+	return has_unprivileged_ping4() && has_unprivileged_ping6();
 }
