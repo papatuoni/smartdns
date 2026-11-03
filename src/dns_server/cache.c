@@ -24,11 +24,76 @@
 #include "request.h"
 #include "rules.h"
 #include "soa.h"
+#include "route_cache.h"
 
 #include <errno.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/wait.h>
+
+/* ---- cache-driven direct route: observer glue ------------------------------
+ * Only the DNS cache owner knows the exact lifecycle. We emit events here and
+ * keep no route state, no thread, no lock and no netlink in this process.
+ * -------------------------------------------------------------------------- */
+
+static void _route_cache_remove_cb(const char *group, const char *domain, int qtype, uint32_t query_flag)
+{
+	struct route_cache_key key;
+	key.group = group;
+	key.domain = domain;
+	key.qtype = qtype;
+	key.query_flag = query_flag;
+	route_cache_on_del(&key);
+}
+
+/* Collect the resolved addresses and the egress each came from.
+ * ip_map is filled by _dns_server_get_answer() before any cache write, so this
+ * works for both the first query and prefetch refreshes. */
+static void _route_cache_emit_insert(struct dns_request *request, struct dns_cache_key *cache_key, int ttl)
+{
+	struct route_cache_addr addrs[ROUTE_CACHE_MAX_ADDR];
+	struct dns_ip_address *addr_map = NULL;
+	unsigned long bucket = 0;
+	struct route_cache_key rkey;
+	int n = 0;
+
+	if (request == NULL || cache_key == NULL || ttl <= 0) {
+		return;
+	}
+
+	memset(addrs, 0, sizeof(addrs));
+	pthread_mutex_lock(&request->ip_map_lock);
+	hash_for_each(request->ip_map, bucket, addr_map, node)
+	{
+		struct route_cache_addr *a;
+		if (n >= ROUTE_CACHE_MAX_ADDR) {
+			break;
+		}
+		if (addr_map->addr_type != DNS_T_A && addr_map->addr_type != DNS_T_AAAA) {
+			continue;
+		}
+		a = &addrs[n];
+		a->family = (addr_map->addr_type == DNS_T_A) ? AF_INET : AF_INET6;
+		memcpy(a->ip, addr_map->ip_addr, (a->family == AF_INET) ? DNS_RR_A_LEN : DNS_RR_AAAA_LEN);
+		if (addr_map->src_ifname[0] != '\0') {
+			safe_strncpy(a->ifname, addr_map->src_ifname, sizeof(a->ifname));
+		} else if (request->src_ifname[0] != '\0') {
+			safe_strncpy(a->ifname, request->src_ifname, sizeof(a->ifname));
+		}
+		n++;
+	}
+	pthread_mutex_unlock(&request->ip_map_lock);
+
+	if (n <= 0) {
+		return; /* no address in this answer, nothing to route */
+	}
+
+	rkey.group = cache_key->dns_group_name;
+	rkey.domain = cache_key->domain;
+	rkey.qtype = cache_key->qtype;
+	rkey.query_flag = cache_key->query_flag;
+	route_cache_on_insert(&rkey, addrs, n, ttl);
+}
 
 int _dns_server_expired_cache_ttl(struct dns_cache *cache, int serve_expired_ttl)
 {
@@ -149,6 +214,8 @@ int _dns_server_request_update_cache(struct dns_request *request, int speed, dns
 	cache_key.qtype = request->qtype;
 	cache_key.query_flag = request->server_flags;
 
+	int cache_timeout = 0;
+	
 	if (request->prefetch) {
 		/* no prefetch for mdns request */
 		if (request->is_mdns_lookup) {
@@ -156,21 +223,24 @@ int _dns_server_request_update_cache(struct dns_request *request, int speed, dns
 			goto errout;
 		}
 
-		if (dns_cache_replace(&cache_key, request->rcode, ttl, speed,
-							  _dns_server_get_cache_timeout(request, &cache_key, ttl),
+		cache_timeout = _dns_server_get_cache_timeout(request, &cache_key, ttl);
+		if (dns_cache_replace(&cache_key, request->rcode, ttl, speed, cache_timeout,
 							  !(request->prefetch_flags & PREFETCH_FLAGS_EXPIRED), cache_data) != 0) {
 			ret = 0;
 			goto errout;
 		}
 	} else {
 		/* insert result to cache */
-		if (dns_cache_insert(&cache_key, request->rcode, ttl, speed, _dns_server_get_cache_timeout(request, NULL, ttl),
-							 cache_data) != 0) {
+		cache_timeout = _dns_server_get_cache_timeout(request, NULL, ttl);
+		if (dns_cache_insert(&cache_key, request->rcode, ttl, speed, cache_timeout, cache_data) != 0) {
 			ret = -1;
 			goto errout;
 		}
 	}
 
+	/* Route lifetime follows the cache entry itself (including serve-expired
+	 * extension), not the raw DNS record TTL. */
+	_route_cache_emit_insert(request, &cache_key, cache_timeout);
 	return 0;
 errout:
 	if (cache_data) {
@@ -196,6 +266,8 @@ int _dns_cache_packet(struct dns_server_post_context *context)
 	cache_key.qtype = context->qtype;
 	cache_key.query_flag = request->server_flags;
 
+	int cache_timeout = 0;
+	
 	if (request->prefetch) {
 		/* no prefetch for mdns request */
 		if (request->is_mdns_lookup) {
@@ -203,21 +275,24 @@ int _dns_cache_packet(struct dns_server_post_context *context)
 			goto errout;
 		}
 
-		if (dns_cache_replace(&cache_key, request->rcode, request->ip_ttl, -1,
-							  _dns_server_get_cache_timeout(request, &cache_key, request->ip_ttl),
+		cache_timeout = _dns_server_get_cache_timeout(request, &cache_key, request->ip_ttl);
+		if (dns_cache_replace(&cache_key, request->rcode, request->ip_ttl, -1, cache_timeout,
 							  !(request->prefetch_flags & PREFETCH_FLAGS_EXPIRED), cache_packet) != 0) {
 			ret = 0;
 			goto errout;
 		}
 	} else {
 		/* insert result to cache */
-		if (dns_cache_insert(&cache_key, request->rcode, request->ip_ttl, -1,
-							 _dns_server_get_cache_timeout(request, NULL, request->ip_ttl), cache_packet) != 0) {
+		cache_timeout = _dns_server_get_cache_timeout(request, NULL, request->ip_ttl);
+		if (dns_cache_insert(&cache_key, request->rcode, request->ip_ttl, -1, cache_timeout, cache_packet) != 0) {
 			ret = -1;
 			goto errout;
 		}
 	}
 
+	/* Route lifetime follows the cache entry itself (including serve-expired
+	 * extension), not the raw DNS record TTL. */
+	_route_cache_emit_insert(request, &cache_key, cache_timeout);
 	return 0;
 errout:
 	if (cache_packet) {
@@ -302,6 +377,18 @@ static int _dns_server_process_cache_packet(struct dns_request *request, struct 
 	context.do_reply = 1;
 	context.is_cache_reply = 1;
 	context.reply_ttl = _dns_server_get_expired_ttl_reply(request, dns_cache);
+	
+	/* Cache hit: refresh TTL only. Never rewrite FIB - that would defeat
+	 * hardware offload flow caching and was the root of periodic churn. */
+	{
+		struct route_cache_key rkey;
+		rkey.group = dns_cache->info.dns_group_name;
+		rkey.domain = dns_cache->info.domain;
+		rkey.qtype = dns_cache->info.qtype;
+		rkey.query_flag = dns_cache->info.query_flag;
+		route_cache_on_hit(&rkey, dns_cache_get_ttl(dns_cache));
+	}
+
 	ret = _dns_server_reply_passthrough(&context);
 out:
 	if (cache_packet) {
@@ -565,6 +652,9 @@ static dns_cache_tmout_action_t _dns_server_cache_expired(struct dns_cache *dns_
 
 int _dns_server_cache_init(void)
 {
+	route_cache_init();
+	dns_cache_set_remove_hook(_route_cache_remove_cb);
+
 	if (dns_cache_init(dns_conf.cachesize, dns_conf.cache_max_memsize, _dns_server_cache_expired) != 0) {
 		tlog(TLOG_ERROR, "init cache failed.");
 		return -1;
