@@ -138,7 +138,7 @@ errout:
  * 所以首选模式建不出来时（EACCES / EPERM / EAFNOSUPPORT）就地换另一种，
  * 并把实际用到的模式回写给调用方，收包解析据此判断有没有 IP 头。
  */
-+static int _fast_ping_open_icmp_sock(int af, int prefer_dgram, int *is_raw)
+static int _fast_ping_open_icmp_sock(int af, int prefer_dgram, int *is_raw)
 {
 	int proto = (af == AF_INET) ? IPPROTO_ICMP : IPPROTO_ICMPV6;
 	int fd = -1;
@@ -230,6 +230,7 @@ int _fast_ping_create_icmp_sock_ex(FAST_PING_TYPE type, struct ping_host_struct 
 			icmp_host = &ping.icmp6_host;
 		}
 		break;
+	}
 	default:
 		return -1;
 	}
