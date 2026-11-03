@@ -94,6 +94,13 @@ int dns_cache_init(int size, int mem_size, dns_cache_callback timeout_callback)
 	return 0;
 }
 
+static dns_cache_remove_hook dns_cache_remove_cb = NULL;
+
+void dns_cache_set_remove_hook(dns_cache_remove_hook hook)
+{
+	dns_cache_remove_cb = hook;
+}
+
 static struct dns_cache *_dns_cache_first(void)
 {
 	return list_first_entry_or_null(&dns_cache_head.cache_list, struct dns_cache, list);
@@ -155,6 +162,11 @@ static void _dns_cache_remove(struct dns_cache *dns_cache)
 		return;
 	}
 
+	if (dns_cache_remove_cb != NULL) {
+		dns_cache_remove_cb(dns_cache->info.dns_group_name, dns_cache->info.domain, dns_cache->info.qtype,
+							dns_cache->info.query_flag);
+	}
+	
 	hash_del(&dns_cache->node);
 	list_del_init(&dns_cache->list);
 	if (dns_timer_del(&dns_cache->timer)) {
