@@ -172,7 +172,7 @@ struct fast_ping_packet *_fast_ping_icmp6_packet(struct ping_host_struct *ping_h
 		return NULL;
 	}
 
-	if (ping.no_unprivileged_ping) {
+	if (ping.no_unprivileged_ping6) {
 		if (icmp6->icmp6_id != ping.ident) {
 			tlog(TLOG_ERROR, "ident failed, %d:%d", icmp6->icmp6_id, ping.ident);
 			return NULL;
