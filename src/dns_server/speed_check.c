@@ -336,44 +336,84 @@ int _dns_server_second_ping_check(struct dns_request *request)
 {
 	struct dns_ip_address *addr_map = NULL;
 	unsigned long bucket = 0;
-	char ip[DNS_MAX_CNAME_LEN] = {0};
+	char *ips = NULL;
+	char *ip = NULL;
+	int ip_num = 0;
+	int max_ips = 0;
 	int ret = -1;
+	int i = 0;
 
 	if (request->has_ping_result) {
 		return ret;
 	}
 
-	/* start tcping */
+	/*
+	 * Do NOT hold ip_map_lock while calling _dns_server_check_speed().
+	 * That path reaches _dns_server_ping() -> _dns_server_addr_map_by_ip_str()
+	 * -> _dns_ip_address_get(), which locks ip_map_lock again.  ip_map_lock is
+	 * a plain (non-recursive) mutex living inside the heap-allocated request,
+	 * so the same thread deadlocks itself and the futex word stays locked
+	 * forever (0x80000010).  Every later thread then queues on the same lock,
+	 * the main epoll loop never returns, and the DNS socket backlog grows.
+	 *
+	 * Collect the addresses under the lock, release it, then start the pings.
+	 */
 	pthread_mutex_lock(&request->ip_map_lock);
 	hash_for_each(request->ip_map, bucket, addr_map, node)
 	{
+		if (addr_map->addr_type == DNS_T_A || addr_map->addr_type == DNS_T_AAAA) {
+			max_ips++;
+		}
+	}
+	pthread_mutex_unlock(&request->ip_map_lock);
+
+	if (max_ips <= 0) {
+		return ret;
+	}
+
+	ips = calloc(max_ips, DNS_MAX_CNAME_LEN);
+	if (ips == NULL) {
+		return ret;
+	}
+
+	pthread_mutex_lock(&request->ip_map_lock);
+	hash_for_each(request->ip_map, bucket, addr_map, node)
+	{
+		if (ip_num >= max_ips) {
+			break;
+		}
+
+		ip = ips + (size_t)ip_num * DNS_MAX_CNAME_LEN;
 		switch (addr_map->addr_type) {
-		case DNS_T_A: {
-			_dns_server_request_get(request);
-			snprintf(ip, sizeof(ip), "%d.%d.%d.%d", addr_map->ip_addr[0], addr_map->ip_addr[1], addr_map->ip_addr[2],
-					 addr_map->ip_addr[3]);
-			ret = _dns_server_check_speed(request, ip);
-			if (ret != 0) {
-				_dns_server_request_release(request);
-			}
-		} break;
-		case DNS_T_AAAA: {
-			_dns_server_request_get(request);
-			snprintf(ip, sizeof(ip), "[%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x]",
+		case DNS_T_A:
+			snprintf(ip, DNS_MAX_CNAME_LEN, "%d.%d.%d.%d", addr_map->ip_addr[0], addr_map->ip_addr[1],
+					 addr_map->ip_addr[2], addr_map->ip_addr[3]);
+			ip_num++;
+			break;
+		case DNS_T_AAAA:
+			snprintf(ip, DNS_MAX_CNAME_LEN,
+					 "[%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x:%.2x%.2x]",
 					 addr_map->ip_addr[0], addr_map->ip_addr[1], addr_map->ip_addr[2], addr_map->ip_addr[3],
 					 addr_map->ip_addr[4], addr_map->ip_addr[5], addr_map->ip_addr[6], addr_map->ip_addr[7],
 					 addr_map->ip_addr[8], addr_map->ip_addr[9], addr_map->ip_addr[10], addr_map->ip_addr[11],
 					 addr_map->ip_addr[12], addr_map->ip_addr[13], addr_map->ip_addr[14], addr_map->ip_addr[15]);
-			ret = _dns_server_check_speed(request, ip);
-			if (ret != 0) {
-				_dns_server_request_release(request);
-			}
-		} break;
+			ip_num++;
+			break;
 		default:
 			break;
 		}
 	}
 	pthread_mutex_unlock(&request->ip_map_lock);
 
+	for (i = 0; i < ip_num; i++) {
+		ip = ips + (size_t)i * DNS_MAX_CNAME_LEN;
+		_dns_server_request_get(request);
+		ret = _dns_server_check_speed(request, ip);
+		if (ret != 0) {
+			_dns_server_request_release(request);
+		}
+	}
+
+	free(ips);
 	return ret;
 }
