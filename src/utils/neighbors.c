@@ -181,6 +181,15 @@ static int _netlink_neighbor_dump_once(int family,
 
 	while (dump_done == 0) {
 		recv_count++;
+		/* Hard cap for EVERY path through the loop. Previously the limit was
+		 * only checked in the EAGAIN branch, so a stream of truncated
+		 * (MSG_TRUNC) or seq-mismatched messages could spin here forever
+		 * while holding netlink_neighbor_lock. */
+		if (recv_count > 100) {
+			errno = ETIMEDOUT;
+			return -1;
+		}
+
 		len = recvmsg(netlink_neighbor_fd, &msg, 0);
 		if (len < 0) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
@@ -188,11 +197,6 @@ static int _netlink_neighbor_dump_once(int family,
 					/* a truncated batch may have swallowed NLMSG_DONE, the
 					 * caller retries the whole dump anyway */
 					break;
-				}
-
-				if (recv_count > 100) {
-					errno = ETIMEDOUT;
-					return -1;
 				}
 
 				struct timespec waiter;
