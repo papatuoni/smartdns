@@ -192,7 +192,6 @@ void _dns_server_process_neighbor_cache_event(void)
 	struct msghdr msg;
 	struct nlmsghdr *nlh = NULL;
 	int fd = -1;
-	int resynced = 0;
 
 	if (server.neigh_netlink_fd < 0) {
 		return;
@@ -209,12 +208,13 @@ void _dns_server_process_neighbor_cache_event(void)
 	while (1) {
 		ssize_t len = recvmsg(fd, &msg, 0);
 		if (len < 0) {
-			if (errno == ENOBUFS && resynced == 0) {
-				/* events were dropped, resync from a full table dump */
-				resynced = 1;
-				netlink_get_neighbors(AF_UNSPEC, NULL, 0, _dns_server_neighbor_cache_dump_callback, NULL);
-				continue;
-			}
+			/* Queue overflow (ENOBUFS) must NOT trigger a synchronous
+			 * full-table dump from inside the main epoll callback.
+			 * netlink_get_neighbors() takes netlink_neighbor_lock and waits
+			 * for NLMSG_DONE; under sustained neighbor events this can stall
+			 * the whole DNS receive loop and freeze every listening socket.
+			 * Dropped events are self-healing: the next RTM_NEWNEIGH and the
+			 * cache timeout refresh the entry. */
 			break;
 		}
 
