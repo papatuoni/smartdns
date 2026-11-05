@@ -152,6 +152,15 @@ static int dns_server_resolve_callback(const char *domain, dns_result_type rtype
 	safe_strncpy(request->src_ifname, dns_client_server_info_get_ifname(server_info),
 				 sizeof(request->src_ifname));
 
+	/* Explicit speed-check egress wins once; later replies must not overwrite
+	 * it (upstream callbacks can arrive out of order). An empty declaration
+	 * leaves the field free for a later upstream that does declare one. */
+	if (request->speed_check_ifname[0] == '\0') {
+		safe_strncpy(request->speed_check_ifname,
+					 dns_client_server_info_get_speed_check_ifname(server_info),
+					 sizeof(request->speed_check_ifname));
+	}
+
 	if (rtype == DNS_QUERY_RESULT) {
 		tlog(TLOG_DEBUG, "query result from server %s:%d, type: %d, domain: %s qtype: %d rcode: %d, id: %d",
 			 dns_client_get_server_ip(server_info), dns_client_get_server_port(server_info),
