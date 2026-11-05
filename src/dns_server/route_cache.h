@@ -7,16 +7,20 @@
  * 生命周期完全由 DNS 缓存事件驱动：
  *   写缓存成功 (miss / prefetch)      -> route_cache_on_insert  差集更新 /32
  *   缓存命中                          -> route_cache_on_hit     只刷新 TTL，零内核写入
- *   缓存删除 (过期 / LRU / flush)     -> route_cache_on_del     引用归零后延迟删 /32
+ *   缓存删除 (过期 / LRU / flush)     -> route_cache_on_del     O(1) 挂 pending 链
+ *   缓存持久化恢复                    -> 不触发 on_insert，/32 不重建（已知行为）
  *   进程退出                          -> route_cache_exit       清空全部 /32
  *
- * 约束（针对此前 futex 死锁）：
+ * 约束（针对此前 futex 死锁与 reload 停顿）：
  *   - 无线程、无定时器、无队列；只有一把 trylock 保护纯内存哈希表
  *   - 拿不到锁立即跳过事件，绝不无限等待
  *   - netlink fd 非阻塞，只 sendmsg，不等 ACK、不设 SO_RCVTIMEO
+ *   - on_del 运行在 dns_cache_head.lock 内，必须 O(1)：批量 flush 时零全表扫描、
+ *     零 netlink；/32 删除推迟到缓存锁外的 on_insert / on_hit，只遍历 pending 链
  *
  * 指定出口：只写 main 表 IP/32 dev <ifname> [via <gw>]，FIB 直查，兼容硬件卸载。
  * ifname 为空 = 默认出口，不写任何主机路由。
+ * RFC1918 不滤，手动 address 指定的内网 IP 同样可走 -interface 出口。
  *************************************************************************/
 
 #ifndef SMARTDNS_ROUTE_CACHE_H
@@ -78,6 +82,8 @@ extern int route_cache_test_n;
 void route_cache_test_reset(void);
 int route_cache_test_ip_num(void);
 int route_cache_test_owner_num(void);
+int route_cache_test_pending_num(void);
+int route_cache_test_owner_tail(void);
 #endif
 
 #ifdef __cplusplus
