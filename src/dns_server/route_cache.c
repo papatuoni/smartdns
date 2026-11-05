@@ -5,14 +5,26 @@
  *
  * 事件来源（dns_cache.c 的 remove hook 与 dns_server/cache.c 的写缓存挂点）：
  *   insert / replace -> on_insert   差集更新（新 IP 写 /32，消失的 IP 引用减一）
- *   hit              -> on_hit      只刷新 TTL 与 LRU，零内核命令
- *   del              -> on_del      引用归零，延迟一个事件后删 /32（抵消 replace 抖动）
- *   exit             -> exit        清空全部 /32
+ *   insert / prefetch -> on_insert  差集更新（新 IP 写 /32，消失的 IP 引用减一）
+ *   hit               -> on_hit     只刷新 TTL；pending 为空时零命令零扫描
+ *   del               -> on_del     引用归零，O(1) 挂 pending 链，不扫表、不发命令
+ *   exit              -> exit       清空全部 /32
  *
  * 不卡死的三条硬约束：
  *   1. 无线程、无定时器、无队列；一把 RECURSIVE trylock，拿不到就跳过事件
- *   2. 锁内只有纯内存哈希表操作 + 一次 sendmsg(MSG_DONTWAIT)；不等 ACK、不设超时
- *   3. 不设 SO_RCVTIMEO；ACK 用 MSG_DONTWAIT 排空，最多 32 条
+ *   2. 锁内只有纯内存哈希表操作 + sendmsg(MSG_DONTWAIT)；不等 ACK、不设超时
+ *   3. on_del 在 dns_cache_head.lock 内被调用，必须保持 O(1)：
+ *      dns_cache_flush() 会连续调 N 次，任何全表扫描或 netlink 都会把全局
+ *      缓存锁拉长成可见停顿。/32 的实际删除推迟到缓存锁外的 on_insert/on_hit，
+ *      且只遍历 pending 链，不再扫 1024 个桶。
+ *
+ * 出口归属：同一 IP 被多个域名引用时先到先得；但某域名自身更换出口仍允许
+ * REPLACE（判据见 on_insert），不会被"先到"卡死。on_del 拿不到 g_lock 时不
+ * 静默丢 DEL：置 g_force_default，由缓存锁外事件清空全部 /32 回落默认路由。
+ *
+ * 地址过滤：只滤 loopback / link-local / 组播 / 广播 / 198.18 fake-ip / ULA。
+ * RFC1918 不滤——手动 address 指定的内网 IP 也应能走 -interface 出口。
+ * cache-persist 恢复的条目不触发 on_insert，其 /32 不重建，属已知可接受行为。
  *************************************************************************/
 
 #include "route_cache.h"
@@ -71,6 +83,8 @@ struct route_ip {
 	int ref;
 	time_t expire;
 	unsigned long born_seq; /* 0 = not pending delete */
+	struct route_ip *pending_prev;
+	struct route_ip *pending_next;
 };
 
 struct route_owner {
@@ -94,7 +108,9 @@ struct gw_ent {
 
 static pthread_mutex_t g_lock;
 static int g_inited = 0;
+#ifndef ROUTE_CACHE_UNIT_TEST
 static int g_fd = -1;
+#endif
 static unsigned long g_seq = 0;
 static unsigned int g_nl_seq = 0;
 static unsigned int g_sweep_bucket = 0;
@@ -109,6 +125,15 @@ static int g_ip_num = 0;
 static int g_owner_num = 0;
 static struct gw_ent g_gw[ROUTE_GW_CACHE_MAX];
 static int g_gw_num = 0;
+
+/* pending delete 双向链表。_flush_pending 只遍历它，不再扫 1024 个桶。
+ * 链上条目数就是待删条目数：计数与内容天然一致，不需要单独维护计数器，
+ * 也就没有"计数归零但桶里仍有残留"这类并发不一致窗口。 */
+static struct route_ip *g_pending_head;
+static struct route_ip *g_pending_tail;
+
+/* on_del 拿不到 g_lock 时置位；缓存锁外事件清空全部 /32 回落默认路由。 */
+static volatile int g_force_default = 0;
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -229,6 +254,44 @@ static void _lru_owner_touch(struct route_owner *o)
 	_lru_owner_append(o);
 }
 
+static void _pending_link(struct route_ip *e)
+{
+	if (e == NULL || e->born_seq != 0) {
+		return;
+	}
+	e->born_seq = g_seq;
+	e->pending_prev = g_pending_tail;
+	e->pending_next = NULL;
+	if (g_pending_tail != NULL) {
+		g_pending_tail->pending_next = e;
+	} else {
+		g_pending_head = e;
+	}
+	g_pending_tail = e;
+}
+
+/* 摘链同时清 born_seq。所有"取消待删 / 已删 / 释放前"路径都必须走这里，
+ * 否则 g_pending_head/tail 会指向已 free 的内存。 */
+static void _pending_unlink(struct route_ip *e)
+{
+	if (e == NULL || e->born_seq == 0) {
+		return;
+	}
+	if (e->pending_prev != NULL) {
+		e->pending_prev->pending_next = e->pending_next;
+	} else if (g_pending_head == e) {
+		g_pending_head = e->pending_next;
+	}
+	if (e->pending_next != NULL) {
+		e->pending_next->pending_prev = e->pending_prev;
+	} else if (g_pending_tail == e) {
+		g_pending_tail = e->pending_prev;
+	}
+	e->pending_prev = NULL;
+	e->pending_next = NULL;
+	e->born_seq = 0;
+}
+
 static void _ip_free(struct route_ip *e)
 {
 	unsigned int b = _ip_hash(e->family, e->ip);
@@ -240,6 +303,7 @@ static void _ip_free(struct route_ip *e)
 	if (*pp == e) {
 		*pp = e->hnext;
 	}
+	_pending_unlink(e);
 	_lru_ip_unlink(e);
 	g_ip_num--;
 	free(e);
@@ -454,6 +518,8 @@ int route_cache_addr_ignored(const unsigned char *ip, int family)
 		return 1;
 	}
 	if (family == AF_INET) {
+		/* RFC1918 故意不滤：address /domain/10.x 手动指定的内网 IP 也要能
+		 * 走 -interface 出口。上游正常不会返回内网地址；真出现就按出口写 /32。 */
 		if (a[0] == 0 || a[0] == 127) {
 			return 1;
 		}
@@ -605,6 +671,11 @@ static struct route_ip *_ip_get(int family, const unsigned char *ip, const char 
 	}
 	if (g_ip_num >= ROUTE_CACHE_MAX_IP) {
 		struct route_ip *victim = g_ip_lru_head;
+		/* 淘汰仍被域名引用的条目会让 owner->addrs 悬空、内核 /32 却被删。
+		 * 找不到可淘汰项就跳过本次路由（回落默认），比破坏引用表安全。 */
+		while (victim != NULL && victim->ref > 0) {
+			victim = victim->lru_next;
+		}
 		if (victim == NULL) {
 			return NULL;
 		}
@@ -644,22 +715,48 @@ static void _ip_unref(struct route_ip *e)
 	}
 	e->ref--;
 	if (e->ref == 0) {
-		e->born_seq = g_seq; /* 延迟一个事件再删，抵消 replace 的 DEL->SET */
+		/* 延迟一个事件再删，抵消 dns_cache_insert() 同 key 覆盖的 DEL->SET 抖动。
+		 * 只挂 pending 链：on_del 在 dns_cache_head.lock 内，必须保持 O(1)。 */
+		_pending_link(e);
 	}
 }
 
 static void _flush_pending(void)
 {
+	struct route_ip *e = g_pending_head;
+
+	/* O(pending)，不再是 O(1024 桶)。pending 为空时连循环体都不进。 */
+	while (e != NULL) {
+		struct route_ip *next = e->pending_next;
+		if (e->ref > 0) {
+			_pending_unlink(e); /* 已被新 insert 复活，无需删除 */
+		} else if (e->born_seq < g_seq && e->in_kernel) {
+			_kern_cmd(e, 1);
+			e->in_kernel = 0;
+			_pending_unlink(e);
+		}
+		e = next;
+	}
+}
+
+/* 只在缓存锁外的 on_insert / on_hit 调用，极端情况下才发生一次。
+ * 清空全部 /32 让流量回落默认路由，避免拿不到锁的那次 DEL 把流量
+ * 一直导向一个已经不该用的指定出口。 */
+static void _drain_force_default(void)
+{
 	int b;
 
+	if (__atomic_exchange_n(&g_force_default, 0, __ATOMIC_ACQ_REL) == 0) {
+		return;
+	}
 	for (b = 0; b < ROUTE_IP_BUCKETS; b++) {
 		struct route_ip *e;
 		for (e = g_ip_bucket[b]; e != NULL; e = e->hnext) {
-			if (e->born_seq != 0 && e->born_seq < g_seq && e->ref == 0 && e->in_kernel) {
+			if (e->in_kernel) {
 				_kern_cmd(e, 1);
 				e->in_kernel = 0;
-				e->born_seq = 0;
 			}
+			_pending_unlink(e);
 		}
 	}
 }
@@ -676,7 +773,7 @@ static void _sweep(time_t now)
 			if (e->ref == 0 && e->in_kernel && e->expire <= now) {
 				_kern_cmd(e, 1);
 				e->in_kernel = 0;
-				e->born_seq = 0;
+				_pending_unlink(e);
 			}
 			if (e->ref == 0 && !e->in_kernel && e->expire + ROUTE_ORPHAN_KEEP <= now) {
 				_ip_free(e);
@@ -702,7 +799,7 @@ static void _enforce_limits(void)
 				if (e->ref == 0 && e->in_kernel) {
 					_kern_cmd(e, 1);
 					e->in_kernel = 0;
-					e->born_seq = 0;
+					_pending_unlink(e);
 				}
 			}
 		}
@@ -710,8 +807,11 @@ static void _enforce_limits(void)
 	}
 	while (g_ip_num > ROUTE_CACHE_MAX_IP) {
 		struct route_ip *e = g_ip_lru_head;
+		while (e != NULL && e->ref > 0) {
+			e = e->lru_next;
+		}
 		if (e == NULL) {
-			break;
+			break; /* 全部仍被引用，不破坏 owner->addrs，也不死循环 */
 		}
 		if (e->in_kernel) {
 			_kern_cmd(e, 1);
@@ -749,6 +849,8 @@ int route_cache_init(void)
 	g_ip_lru_head = g_ip_lru_tail = NULL;
 	g_owner_lru_head = g_owner_lru_tail = NULL;
 	g_ip_num = g_owner_num = 0;
+	g_pending_head = g_pending_tail = NULL;
+	g_force_default = 0;
 	g_gw_num = 0;
 	g_seq = 0;
 	g_nl_seq = 0;
@@ -801,7 +903,9 @@ void route_cache_exit(void)
 	}
 	g_ip_lru_head = g_ip_lru_tail = NULL;
 	g_owner_lru_head = g_owner_lru_tail = NULL;
+	g_pending_head = g_pending_tail = NULL;
 	g_ip_num = g_owner_num = 0;
+	g_force_default = 0;
 #ifndef ROUTE_CACHE_UNIT_TEST
 	if (g_fd >= 0) {
 		close(g_fd);
@@ -828,6 +932,10 @@ void route_cache_on_insert(const struct route_cache_key *key, const struct route
 	if (key == NULL || addrs == NULL || addr_num <= 0) {
 		return;
 	}
+	/* _normalize() 只填 nv[0..nn-1]，下面 memcpy 会把整块写进 owner->addrs。
+	 * 清零，避免把未初始化栈字节存进长期存活的 owner。 */
+	memset(nv, 0, sizeof(nv));
+	memset(old, 0, sizeof(old));
 	nn = _normalize(addrs, addr_num, nv);
 	if (nn == 0) {
 		/* 全被过滤/默认出口：仍要处理旧集合的清理 */
@@ -837,6 +945,7 @@ void route_cache_on_insert(const struct route_cache_key *key, const struct route
 	}
 	g_seq++;
 	_drain_ack();
+	_drain_force_default();
 	now = time(NULL);
 	expire = now + ((ttl > 0) ? ttl : ROUTE_MIN_TTL);
 
@@ -850,24 +959,34 @@ void route_cache_on_insert(const struct route_cache_key *key, const struct route
 	for (i = 0; i < nn; i++) {
 		struct route_ip *e = _ip_get(nv[i].family, nv[i].ip, nv[i].ifname);
 		struct route_cache_addr *m;
+		int was_first;
+		int may_replace;
 		if (e == NULL) {
 			continue;
 		}
-		if (e->born_seq != 0) {
-			e->born_seq = 0; /* 复活上轮 DEL 的 pending 条目 */
-		}
+		was_first = (e->ref == 0);
+		_pending_unlink(e); /* 复活上轮 DEL 的 pending 条目 */
 		m = _find_addr(old, on, nv[i].family, nv[i].ip);
-		if (m == NULL || e->ref == 0) {
+		if (m == NULL || was_first) {
 			e->ref++;
 		}
 		if (expire > e->expire) {
 			e->expire = expire;
 		}
 		_lru_ip_touch(e);
-		if (!e->in_kernel || strncmp(e->ifname, nv[i].ifname, IFNAMSIZ) != 0) {
+		/* 先来先得：e->ref>1 说明已有别的域名引用同一 IP，保留首个出口。
+		 * 例外（不能吞掉 owner 自身的出口迁移）：
+		 *   - was_first：引用从 0 复活 / 孤儿重新被引用，没有活跃 owner；
+		 *   - m != NULL && e->ref <= 1：当前 owner 是唯一引用且它换了出口。
+		 * 出口没变时一律不发命令，DEL->SET 抖动抵消保持零命令。 */
+		may_replace = was_first || (m != NULL && e->ref <= 1);
+		if (!e->in_kernel) {
 			_apply_ifname(e, nv[i].ifname);
 			_kern_cmd(e, 0);
 			e->in_kernel = 1;
+		} else if (may_replace && strncmp(e->ifname, nv[i].ifname, IFNAMSIZ) != 0) {
+			_apply_ifname(e, nv[i].ifname);
+			_kern_cmd(e, 0);
 		}
 	}
 
@@ -890,7 +1009,7 @@ void route_cache_on_insert(const struct route_cache_key *key, const struct route
 		_lru_owner_touch(o);
 	}
 
-	_flush_pending(); /* 只删上一事件遗留、且未被本次复活的 */
+	_flush_pending(); /* 只走 pending 链，删上一事件遗留且未被复活的 */
 	_sweep(now);
 	pthread_mutex_unlock(&g_lock);
 }
@@ -906,6 +1025,7 @@ void route_cache_on_hit(const struct route_cache_key *key, int ttl)
 		return;
 	}
 	g_seq++;
+	_drain_force_default();
 	now = time(NULL);
 	expire = now + ((ttl > 0) ? ttl : ROUTE_MIN_TTL);
 	o = _owner_find(key);
@@ -919,7 +1039,11 @@ void route_cache_on_hit(const struct route_cache_key *key, int ttl)
 			}
 		}
 	}
-	/* 命中路径故意不 flush / 不 sweep：零内核命令 */
+	/* 命中零命令、零扫描：pending 链为空时连 _flush_pending 都不调。
+	 * 只有前面确实发生过 DEL 才补一次删除，避免 /32 残留。 */
+	if (g_pending_head != NULL) {
+		_flush_pending();
+	}
 	pthread_mutex_unlock(&g_lock);
 }
 
@@ -928,7 +1052,13 @@ void route_cache_on_del(const struct route_cache_key *key)
 	struct route_owner *o;
 	int i;
 
-	if (key == NULL || _trylock() == 0) {
+	if (key == NULL) {
+		return;
+	}
+	if (_trylock() == 0) {
+		/* 绝不无限等待，但也不静默丢 DEL：置降级标志，由缓存锁外的
+		 * on_insert / on_hit 清空全部 /32，让流量回落默认路由。 */
+		__atomic_store_n(&g_force_default, 1, __ATOMIC_RELEASE);
 		return;
 	}
 	g_seq++;
@@ -939,8 +1069,9 @@ void route_cache_on_del(const struct route_cache_key *key)
 		}
 		_owner_free(o);
 	}
-	_flush_pending(); /* born_seq == g_seq 的本次条目不删，留到下一事件抵消 */
-	_sweep(time(NULL));
+	/* 故意不 _flush_pending / 不 _sweep：本函数运行在 dns_cache_head.lock 内，
+	 * dns_cache_flush() 会连续调用 N 次，任何全表扫描或 netlink 都会把全局
+	 * 缓存锁拉长成一次可见停顿。/32 删除推迟到缓存锁外的 on_insert/on_hit。 */
 	pthread_mutex_unlock(&g_lock);
 }
 
@@ -953,5 +1084,39 @@ int route_cache_test_ip_num(void)
 int route_cache_test_owner_num(void)
 {
 	return g_owner_num;
+}
+
+int route_cache_test_pending_num(void)
+{
+	int n = 0;
+	struct route_ip *e;
+	for (e = g_pending_head; e != NULL; e = e->pending_next) {
+		n++;
+	}
+	return n;
+}
+
+/* owner->addrs 尾部（n 之后）的非零字节数。配合
+ * -ftrivial-auto-var-init=pattern 编译可验证 on_insert 的 memset 修复。 */
+int route_cache_test_owner_tail(void)
+{
+	int b;
+	int i;
+	int dirty = 0;
+	for (b = 0; b < ROUTE_OWNER_BUCKETS; b++) {
+		struct route_owner *o;
+		for (o = g_owner_bucket[b]; o != NULL; o = o->hnext) {
+			for (i = o->n; i < ROUTE_CACHE_MAX_ADDR; i++) {
+				unsigned char *p = (unsigned char *)&o->addrs[i];
+				int j;
+				for (j = 0; j < (int)sizeof(o->addrs[i]); j++) {
+					if (p[j] != 0) {
+						dirty++;
+					}
+				}
+			}
+		}
+	}
+	return dirty;
 }
 #endif
