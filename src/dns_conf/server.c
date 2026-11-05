@@ -73,6 +73,7 @@ static int _config_server(int argc, char *argv[], dns_server_type_t type, int de
 		{"subnet-all-query-types", no_argument, NULL, 264}, /* send subnent for all query types.*/
 		{"fallback", no_argument, NULL, 265}, /* fallback */
 		{"alpn", required_argument, NULL, 266}, /* alpn */
+		{"speed-check-interface", required_argument, NULL, 267}, /* speed-check egress only */
 		{NULL, no_argument, NULL, 0}
 	};
 	/* clang-format on */
@@ -94,6 +95,8 @@ static int _config_server(int argc, char *argv[], dns_server_type_t type, int de
 	server->httphost[0] = '\0';
 	server->tls_host_verify[0] = '\0';
 	server->proxyname[0] = '\0';
+	server->ifname[0] = '\0';
+	server->speed_check_ifname[0] = '\0';
 	server->set_mark = -1;
 	server->drop_packet_latency_ms = drop_packet_latency_ms;
 	server->tcp_keepalive = tcp_keepalive;
@@ -276,6 +279,10 @@ static int _config_server(int argc, char *argv[], dns_server_type_t type, int de
 		}
 		case 266: {
 			safe_strncpy(server->alpn, optarg, DNS_MAX_ALPN_LEN);
+			break;
+		}
+		case 267: {
+			safe_strncpy(server->speed_check_ifname, optarg, MAX_INTERFACE_LEN);
 			break;
 		}
 		default:
