@@ -186,11 +186,13 @@ out:
 	}
 }
 
-/* Egress for a probe: prefer the address's own source interface (so an IP
- * learned over WAN-A is measured over WAN-A), then the request-level fallback.
- * No group traversal, no SO_MARK, no request->ping_bind state. */
-
+/* Egress for a probe: an explicit -speed-check-interface always wins (it is
+ * measure-only and detached from the query socket). Otherwise prefer the
+ * address's own source interface (so an IP learned over WAN-A is measured
+ * over WAN-A), then the request-level fallback. No group traversal, no
+ * SO_MARK, no request->ping_bind state. */
 /*
+
  * 把 "1.2.3.4" / "1.2.3.4:80" / "[fd00::1]" / "[fd00::1]:80" 还原成 ip_map 里的候选条目。
  *
  * 测速入口拿到的是字符串（ICMP 是裸 IP，TCP 带 :port，IPv6 还带方括号），
@@ -250,7 +252,17 @@ static int _dns_server_ping(struct dns_request *request, PING_TYPE type, char *i
 
 	memset(&bind, 0, sizeof(bind));
 	addr_map = _dns_server_addr_map_by_ip_str(request, ip);
-	if (addr_map != NULL && addr_map->src_ifname[0] != '\0') {
+	/*
+	 * Egress priority for a probe:
+	 *   1. -speed-check-interface on the upstream (explicit, measure-only)
+	 *   2. per-IP source ifname (-interface of the upstream that returned it)
+	 *   3. request-level src_ifname (same -interface, reply fallback)
+	 * Only (1) is independent from the query socket; (2)/(3) preserve the
+	 * original behaviour when the new option is not configured.
+	 */
+	if (request->speed_check_ifname[0] != '\0') {
+		safe_strncpy(bind.ifname, request->speed_check_ifname, sizeof(bind.ifname));
+	} else if (addr_map != NULL && addr_map->src_ifname[0] != '\0') {
 		safe_strncpy(bind.ifname, addr_map->src_ifname, sizeof(bind.ifname));
 	} else if (request->src_ifname[0] != '\0') {
 		safe_strncpy(bind.ifname, request->src_ifname, sizeof(bind.ifname));
