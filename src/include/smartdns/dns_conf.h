@@ -446,6 +446,7 @@ struct dns_servers {
 	char path[DNS_MAX_URL_LEN];
 	char proxyname[PROXY_NAME_LEN];
 	char ifname[MAX_INTERFACE_LEN];
+	char speed_check_ifname[MAX_INTERFACE_LEN];
 	char alpn[DNS_MAX_ALPN_LEN];
 	struct dns_edns_client_subnet ipv4_ecs;
 	struct dns_edns_client_subnet ipv6_ecs;
