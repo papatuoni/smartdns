@@ -245,6 +245,7 @@ static int _smartdns_prepare_server_flags(struct client_dns_server_flags *flags,
 	flags->fallback = server->fallback;
 	safe_strncpy(flags->proxyname, server->proxyname, sizeof(flags->proxyname));
 	safe_strncpy(flags->ifname, server->ifname, sizeof(flags->ifname));
+	safe_strncpy(flags->speed_check_ifname, server->speed_check_ifname, sizeof(flags->speed_check_ifname));
 	if (server->ipv4_ecs.enable) {
 		flags->ipv4_ecs.enable = 1;
 		safe_strncpy(flags->ipv4_ecs.ip, server->ipv4_ecs.ip, sizeof(flags->ipv4_ecs.ip));
