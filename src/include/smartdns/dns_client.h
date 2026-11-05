@@ -95,6 +95,8 @@ const char *dns_client_get_server_ip(struct dns_server_info *server_info);
 
 const char *dns_client_server_info_get_ifname(struct dns_server_info *server_info);
 
+const char *dns_client_server_info_get_speed_check_ifname(struct dns_server_info *server_info);
+
 long long dns_client_server_info_get_so_mark(struct dns_server_info *server_info);
 
 dns_server_security_status dns_client_get_server_security_status(struct dns_server_info *server_info);
@@ -179,6 +181,9 @@ struct client_dns_server_flags {
 
 	char proxyname[DNS_MAX_CNAME_LEN];
 	char ifname[DNS_SERVER_IFNAME_LEN];
+	/* Measure-only egress (-speed-check-interface). Never used by the query
+	 * socket and never recorded as a reply's source ifname. */
+	char speed_check_ifname[DNS_SERVER_IFNAME_LEN];
 
 	int subnet_all_query_types;
 	struct client_dns_server_flag_ecs ipv4_ecs;
