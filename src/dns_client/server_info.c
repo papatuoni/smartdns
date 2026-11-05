@@ -710,6 +710,17 @@ const char *dns_client_server_info_get_ifname(struct dns_server_info *server_inf
 	return server_info->ifname;
 }
 
+/* Measure-only egress of the upstream that produced a reply. The flags block
+ * is copied verbatim in _dns_client_server_add(), so no extra field is needed
+ * on struct dns_server_info. */
+const char *dns_client_server_info_get_speed_check_ifname(struct dns_server_info *server_info)
+{
+	if (server_info == NULL) {
+		return "";
+	}
+	return server_info->flags.speed_check_ifname;
+}
+
 long long dns_client_server_info_get_so_mark(struct dns_server_info *server_info)
 {
 	if (server_info == NULL) {
