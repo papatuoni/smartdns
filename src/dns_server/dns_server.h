@@ -293,6 +293,10 @@ struct dns_request {
 	char dns_group_name[DNS_GROUP_NAME_LEN];
 	/* -interface of the upstream currently delivering this reply. */
 	char src_ifname[DNS_SERVER_IFNAME_LEN];
+	/* Explicit -speed-check-interface, set once from the first upstream that
+	 * declares it. Independent of src_ifname: it never reaches the cache,
+	 * ipset/nftset or the direct-route /32 observer. */
+	char speed_check_ifname[DNS_SERVER_IFNAME_LEN];
 	/* Cross-group cache read: points to a group name string owned by the
 	 * server-group table (valid for the process lifetime), so no copy is needed
 	 * and NULL directly means "not configured".
