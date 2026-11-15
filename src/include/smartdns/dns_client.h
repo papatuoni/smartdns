@@ -97,6 +97,8 @@ const char *dns_client_server_info_get_ifname(struct dns_server_info *server_inf
 
 const char *dns_client_server_info_get_speed_check_ifname(struct dns_server_info *server_info);
 
+int dns_client_server_info_get_route_cache_mode(struct dns_server_info *server_info);
+
 long long dns_client_server_info_get_so_mark(struct dns_server_info *server_info);
 
 dns_server_security_status dns_client_get_server_security_status(struct dns_server_info *server_info);
@@ -178,6 +180,8 @@ struct client_dns_server_flags {
 	int tcp_keepalive;
 	int drop_packet_latency_ms;
 	int fallback;
+	/* 0 = follow global, 1 = emit /32, -1 = query-only. */
+	int route_cache_mode;
 
 	char proxyname[DNS_MAX_CNAME_LEN];
 	char ifname[DNS_SERVER_IFNAME_LEN];
