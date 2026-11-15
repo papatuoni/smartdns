@@ -447,6 +447,9 @@ struct dns_servers {
 	char proxyname[PROXY_NAME_LEN];
 	char ifname[MAX_INTERFACE_LEN];
 	char speed_check_ifname[MAX_INTERFACE_LEN];
+	/* Per-upstream override for the cache-driven /32 route observer:
+	 * 0 = follow global route-cache, 1 = force on, -1 = force off. */
+	int route_cache_mode;
 	char alpn[DNS_MAX_ALPN_LEN];
 	struct dns_edns_client_subnet ipv4_ecs;
 	struct dns_edns_client_subnet ipv6_ecs;
@@ -730,6 +733,8 @@ struct dns_config {
 	ssize_t cache_max_memsize;
 	struct dns_servers servers[DNS_MAX_SERVERS];
 	int server_num;
+	/* Global default for -interface route emission; default 0 (query-only). */
+	int route_cache_enable;
 
 	/* proxy servers */
 	struct dns_proxy_servers proxy_servers[PROXY_MAX_SERVERS];
