@@ -239,6 +239,7 @@ static int _smartdns_prepare_server_flags(struct client_dns_server_flags *flags,
 	flags->server_flag = server->server_flag;
 	flags->result_flag = server->result_flag;
 	flags->set_mark = server->set_mark;
+	flags->route_cache_mode = server->route_cache_mode;
 	flags->drop_packet_latency_ms = server->drop_packet_latency_ms;
 	flags->tcp_keepalive = server->tcp_keepalive;
 	flags->subnet_all_query_types = server->subnet_all_query_types;
