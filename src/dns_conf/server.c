@@ -74,6 +74,8 @@ static int _config_server(int argc, char *argv[], dns_server_type_t type, int de
 		{"fallback", no_argument, NULL, 265}, /* fallback */
 		{"alpn", required_argument, NULL, 266}, /* alpn */
 		{"speed-check-interface", required_argument, NULL, 267}, /* speed-check egress only */
+		{"route-cache", no_argument, NULL, 268}, /* opt-in: let -interface also drive /32 routes */
+		{"no-route-cache", no_argument, NULL, 269}, /* force query-only for this upstream */
 		{NULL, no_argument, NULL, 0}
 	};
 	/* clang-format on */
@@ -98,6 +100,7 @@ static int _config_server(int argc, char *argv[], dns_server_type_t type, int de
 	server->ifname[0] = '\0';
 	server->speed_check_ifname[0] = '\0';
 	server->set_mark = -1;
+	server->route_cache_mode = 0; /* 0 = follow global route-cache, 1 = on, -1 = off */
 	server->drop_packet_latency_ms = drop_packet_latency_ms;
 	server->tcp_keepalive = tcp_keepalive;
 	server->subnet_all_query_types = 0;
@@ -283,6 +286,14 @@ static int _config_server(int argc, char *argv[], dns_server_type_t type, int de
 		}
 		case 267: {
 			safe_strncpy(server->speed_check_ifname, optarg, MAX_INTERFACE_LEN);
+			break;
+		}
+		case 268: {
+			server->route_cache_mode = 1;
+			break;
+		}
+		case 269: {
+			server->route_cache_mode = -1;
 			break;
 		}
 		default:
