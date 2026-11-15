@@ -721,6 +721,15 @@ const char *dns_client_server_info_get_speed_check_ifname(struct dns_server_info
 	return server_info->flags.speed_check_ifname;
 }
 
+/* The whole flags block is copied verbatim in _dns_client_server_add(). */
+int dns_client_server_info_get_route_cache_mode(struct dns_server_info *server_info)
+{
+	if (server_info == NULL) {
+		return 0;
+	}
+	return server_info->flags.route_cache_mode;
+}
+
 long long dns_client_server_info_get_so_mark(struct dns_server_info *server_info)
 {
 	if (server_info == NULL) {
