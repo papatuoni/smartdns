@@ -293,6 +293,8 @@ struct dns_request {
 	char dns_group_name[DNS_GROUP_NAME_LEN];
 	/* -interface of the upstream currently delivering this reply. */
 	char src_ifname[DNS_SERVER_IFNAME_LEN];
+	/* Route-emission override of that same upstream: 0 / 1 / -1. */
+	int route_cache_mode;
 	/* Explicit -speed-check-interface, set once from the first upstream that
 	 * declares it. Independent of src_ifname: it never reaches the cache,
 	 * ipset/nftset or the direct-route /32 observer. */
