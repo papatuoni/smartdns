@@ -214,6 +214,7 @@ static struct config_item _config_item[] = {
 	CONF_SSIZE("cache-mem-size", &dns_conf.cache_max_memsize, 0, CONF_INT_MAX),
 	CONF_CUSTOM("cache-file", _config_option_parser_filepath, (char *)&dns_conf.cache_file),
 	CONF_CUSTOM("data-dir", _config_option_parser_filepath, (char *)&dns_conf.data_dir),
+	CONF_YESNO("route-cache", &dns_conf.route_cache_enable),
 	CONF_YESNO("cache-persist", &dns_conf.cache_persist),
 	CONF_INT("cache-checkpoint-time", &dns_conf.cache_checkpoint_time, 0, 3600 * 24 * 7),
 	CONF_YESNO_FUNC("prefetch-domain", _dns_conf_group_yesno, group_member(dns_prefetch)),
@@ -417,6 +418,7 @@ static void _dns_conf_default_value_init(void)
 	dns_conf.audit_size = 1024 * 1024;
 	dns_conf.cache_checkpoint_time = DNS_DEFAULT_CHECKPOINT_TIME;
 	dns_conf.cache_persist = 2;
+	dns_conf.route_cache_enable = 0; /* default: -interface = query socket only (upstream behaviour) */
 	dns_conf.log_num = 8;
 	dns_conf.log_size = 1024 * 128;
 	dns_conf.log_level = TLOG_ERROR;
