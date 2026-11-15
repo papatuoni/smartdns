@@ -151,6 +151,8 @@ static int dns_server_resolve_callback(const char *domain, dns_result_type rtype
 	/* Remember which egress produced this reply so per-IP addresses carry it. */
 	safe_strncpy(request->src_ifname, dns_client_server_info_get_ifname(server_info),
 				 sizeof(request->src_ifname));
+	/* Follow the same upstream that produced src_ifname. */
+	request->route_cache_mode = dns_client_server_info_get_route_cache_mode(server_info);
 
 	/* Explicit speed-check egress wins once; later replies must not overwrite
 	 * it (upstream callbacks can arrive out of order). An empty declaration
