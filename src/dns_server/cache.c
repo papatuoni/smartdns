@@ -25,6 +25,7 @@
 #include "rules.h"
 #include "soa.h"
 #include "route_cache.h"
+#include "smartdns/dns_conf.h"
 
 #include <errno.h>
 #include <signal.h>
@@ -61,6 +62,17 @@ static void _route_cache_emit_insert(struct dns_request *request, struct dns_cac
 		return;
 	}
 
+	/* -interface binds the query socket on BOTH branches. Writing the /32
+	 * data-plane routes is the custom branch extension and is opt-in here:
+	 *   global route-cache yes  -> every upstream restores custom behaviour
+	 *   -route-cache            -> force on for this upstream
+	 *   -no-route-cache         -> force off even when global is yes
+	 * Leaving a->ifname empty makes route_cache _normalize() drop the address
+	 * (no /32). We STILL call on_insert() so a previous owner written by a
+	 * route-emitting upstream gets its stale routes cleaned via the diff. */
+	int mode = request->route_cache_mode;
+	int emit_route = (mode == 0) ? dns_conf.route_cache_enable : (mode > 0);
+
 	memset(addrs, 0, sizeof(addrs));
 	pthread_mutex_lock(&request->ip_map_lock);
 	hash_for_each(request->ip_map, bucket, addr_map, node)
@@ -75,10 +87,12 @@ static void _route_cache_emit_insert(struct dns_request *request, struct dns_cac
 		a = &addrs[n];
 		a->family = (addr_map->addr_type == DNS_T_A) ? AF_INET : AF_INET6;
 		memcpy(a->ip, addr_map->ip_addr, (a->family == AF_INET) ? DNS_RR_A_LEN : DNS_RR_AAAA_LEN);
-		if (addr_map->src_ifname[0] != '\0') {
-			safe_strncpy(a->ifname, addr_map->src_ifname, sizeof(a->ifname));
-		} else if (request->src_ifname[0] != '\0') {
-			safe_strncpy(a->ifname, request->src_ifname, sizeof(a->ifname));
+		if (emit_route) {
+			if (addr_map->src_ifname[0] != '\0') {
+				safe_strncpy(a->ifname, addr_map->src_ifname, sizeof(a->ifname));
+			} else if (request->src_ifname[0] != '\0') {
+				safe_strncpy(a->ifname, request->src_ifname, sizeof(a->ifname));
+			}
 		}
 		n++;
 	}
